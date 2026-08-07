@@ -1,0 +1,36 @@
+[project]
+name = "trailer"
+version = "0.1.0"
+description = "LiDAR trail detection for OpenStreetMap, targeting a JOSM plugin"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "laspy[lazrs]>=2.5.4",
+    "matplotlib>=3.10.1",
+    "numpy>=2.0",
+    "pyproj>=3.7",
+    "rasterio>=1.4",
+    "requests>=2.32",
+    "scikit-image>=0.25",
+    "scikit-learn>=1.6",
+    "scipy>=1.15",
+    "shapely>=2.0",
+]
+
+[project.optional-dependencies]
+# Training only. Inference in the JOSM plugin runs through onnxruntime's Java
+# API, so nothing here ships to the plugin.
+train = [
+    "segmentation-models-pytorch>=0.4",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "onnx>=1.17",
+    "onnxruntime>=1.20",
+]
+
+[project.scripts]
+trailer = "trailer.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
