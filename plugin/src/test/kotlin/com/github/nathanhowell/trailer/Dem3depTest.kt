@@ -1,6 +1,7 @@
 package com.github.nathanhowell.trailer
 
 import org.junit.jupiter.api.Test
+import java.time.LocalDate
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -208,6 +209,33 @@ class Dem3depTest {
                 """"geometry":{"rings":[$half]}}]}""", bounds)
         assertEquals(0.5, c.coveredFraction, 0.05)
         assertFalse(c.usable)
+    }
+
+    @Test
+    fun `reports the survey date as a range across projects`() {
+        // A trail cut after the LiDAR was flown cannot appear in the overlay at
+        // all, and a mapper who does not know the date will read that absence as
+        // the model saying no. The Sierra window straddles two projects flown two
+        // years apart, so a single date would be a lie about half of it.
+        val sierraCov = Dem3dep.parseCoverage(
+            fixtureText("catalog-complete-sierra.json"), sierra)
+        assertEquals(LocalDate.of(2020, 9, 7), sierraCov.acquired!!.start)
+        assertEquals(LocalDate.of(2022, 9, 23), sierraCov.acquired!!.endInclusive)
+        assertTrue(sierraCov.describe().contains("2020-09-07 to 2022-09-23"),
+                   sierraCov.describe())
+
+        val one = Dem3dep.parseCoverage(
+            fixtureText("catalog-complete-oregon.json"), oregonComplete)
+        assertTrue(one.describe().contains("flown 2022-09-07"), one.describe())
+        assertFalse(one.describe().contains(" to "), "one date should not read as a range")
+    }
+
+    @Test
+    fun `a catalog without acquisition dates simply omits them`() {
+        val c = Dem3dep.parseCoverage(catalog(1.0 to "USGS 1 Meter"), bounds)
+        assertEquals(null, c.acquired)
+        assertTrue(c.describe().contains("USGS 1 Meter"), c.describe())
+        assertFalse(c.describe().contains("flown"), c.describe())
     }
 
     @Test

@@ -6,6 +6,9 @@ import org.openstreetmap.josm.tools.HttpClient
 import java.io.ByteArrayInputStream
 import java.net.URL
 import java.net.URLEncoder
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 import javax.imageio.ImageIO
 
 /**
@@ -118,10 +121,30 @@ object Dem3dep {
      * `LowPS` and *nothing* by area.
      */
     data class Coverage(val bestPixelSizeM: Double, val title: String?,
-                        val sourceCount: Int, val coveredFraction: Double) {
+                        val sourceCount: Int, val coveredFraction: Double,
+                        val acquired: ClosedRange<LocalDate>? = null) {
         val fineEnough get() = bestPixelSizeM <= MAX_SOURCE_PIXEL_M
         val complete get() = coveredFraction >= MIN_COVERED_FRACTION
         val usable get() = fineEnough && complete
+
+        /**
+         * What a mapper needs to judge and cite this overlay.
+         *
+         * The acquisition date is a *range* because a window can legitimately span
+         * two LiDAR projects flown years apart — the four-tile corner in the
+         * Sierra fixture mixes 2020 and 2022 — and a trail cut after the older
+         * survey will be missing from part of the view for reasons that have
+         * nothing to do with the model.
+         */
+        fun describe(): String = buildString {
+            append(title ?: "unknown source")
+            append(" · ").append("%.2g".format(bestPixelSizeM)).append(" m")
+            acquired?.let {
+                append(" · flown ")
+                append(if (it.start.isEqual(it.endInclusive)) "${it.start}"
+                       else "${it.start} to ${it.endInclusive}")
+            }
+        }
     }
 
     class UnsupportedCoverage(val coverage: Coverage) : Exception(
@@ -170,7 +193,9 @@ object Dem3dep {
             "inSR" to "$epsg",
             "spatialRel" to "esriSpatialRelIntersects",
             "where" to "Category = 1",   // primary rasters, not overview pyramids
-            "outFields" to "LowPS,title",
+            // AcquisitionDate is for provenance, not for the coverage decision: a
+            // mapper needs to know whether a trail could postdate the survey.
+            "outFields" to "LowPS,title,AcquisitionDate",
             // Footprints, not just pixel sizes: intersecting is not covering, and
             // without the geometry there is no way to tell the difference.
             "returnGeometry" to "true",
@@ -311,7 +336,19 @@ object Dem3dep {
         }
         if (best == null) return Coverage(Double.MAX_VALUE, null, 0, 0.0)
         return Coverage(bestPs, best.path("attributes").path("title").asText(null),
-                        n, coveredFraction(fine, bounds))
+                        n, coveredFraction(fine, bounds), acquired(fine))
+    }
+
+    /** Acquisition span of the rasters we would actually read, or null if unstated. */
+    private fun acquired(features: List<JsonNode>): ClosedRange<LocalDate>? {
+        val dates = features.mapNotNull {
+            val ms = it.path("attributes").path("AcquisitionDate")
+            // Epoch milliseconds, UTC. Absent on some older products.
+            if (ms.isNumber && ms.asLong() > 0)
+                Instant.ofEpochMilli(ms.asLong()).atZone(ZoneOffset.UTC).toLocalDate()
+            else null
+        }
+        return if (dates.isEmpty()) null else dates.min()..dates.max()
     }
 
     /**
