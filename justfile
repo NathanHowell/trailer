@@ -41,8 +41,15 @@ test-plugin:
 # selection. Checks the corpus first, because the two cheapest ways to waste this
 # run are visible before the first step: a vet-rejected tile still in the
 # training set, or a variant whose validation band is missing a whole class.
+#
+# COST: measured at ~44 min/epoch on MPS (M-series, both variants, crop 256,
+# batch 8), so the 40-epoch default is roughly 29 HOURS plus a TTA held-out pass.
+# Halving `samples` to 1000 is usually the better trade than halving `epochs`:
+# same total crops, but twice as many checkpoints for selection to choose from,
+# and selection is now stratified enough to be worth giving choices to.
+#     just samples=1000 retrain
 
-# Full retrain on the built corpus. Long -- see `just check-corpus` first.
+# Full retrain on the built corpus. ~29 h at defaults -- read the cost note.
 retrain: check-corpus
     uv run --extra train trailer train \
         --root {{root}} --out {{run}} \
