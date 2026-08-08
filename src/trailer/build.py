@@ -158,6 +158,21 @@ def build_all(aois, root: Path, res: float = 0.5, force: bool = False,
                                  evict_points=evict_points))
         except Exception as exc:  # keep going; one bad tile shouldn't stop a run
             log.error("%-22s FAILED: %s", aoi.key, exc)
-            out.append({"aoi": {"key": aoi.key}, "error": str(exc)})
+            rec = {"aoi": {"key": aoi.key}, "error": str(exc)}
+            # Discard any point cloud the failed attempt left behind. build_aoi
+            # reuses points.laz whenever it exists, so a truncated download
+            # poisons every later retry -- and silently, because a partial LAZ
+            # has a valid header claiming the full point count. Observed on
+            # h_362193_s1186299: 508 MB on disk, header claiming 81,423,483
+            # points, unreadable. Re-downloading costs minutes; building a tile
+            # from a fraction of its returns costs a wrong model.
+            laz = root / aoi.slug / "points.laz"
+            if laz.exists():
+                size = laz.stat().st_size
+                laz.unlink()
+                rec["discarded_points_mb"] = round(size / 1e6, 1)
+                log.warning("%-22s discarded %.0f MB of possibly-partial points",
+                            aoi.key, size / 1e6)
+            out.append(rec)
     (root / "index.json").write_text(json.dumps(out, indent=1))
     return out
