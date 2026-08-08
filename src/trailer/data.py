@@ -57,6 +57,7 @@ import torch
 from rasterio.windows import Window
 from torch.utils.data import Dataset
 
+from . import osm
 from . import variants as var_mod
 
 log = logging.getLogger(__name__)
@@ -68,9 +69,22 @@ VAL_COL_FRAC = 0.2
 #: trails all sit at one edge cannot hand most of its area to either split.
 BOUNDARY_RANGE = (0.55, 0.85)
 
-#: Cap on remembered trail-pixel locations per tile. A 1 km tile at 0.5 m holds
-#: ~40k positive pixels; keeping every one buys nothing over a strided sample.
+#: Cap on remembered trail-pixel locations per tile, per class. A 1 km tile at
+#: 0.5 m holds ~40k positive pixels; keeping every one buys nothing over a
+#: strided sample.
 MAX_CENTRES = 20_000
+
+#: Share of positive crops drawn from each visibility class, independent of how
+#: many kilometres of each exist. Harvesting fixed the supply -- trainable faint
+#: went from 0.98 km to 62.8 km and lifecycle from nothing to 95.5 km -- but
+#: supply is not exposure: drawing centres uniformly over trail pixels would
+#: still hand the model whatever the length ratio happens to be, and that ratio
+#: is an accident of what got harvested rather than a statement about what we
+#: want it to learn. Equal thirds says the quiet part directly.
+CLASS_MIX = {"active": 1 / 3, "faint": 1 / 3, "lifecycle": 1 / 3}
+
+#: Band of labels.tif carrying the class code (1-indexed for rasterio).
+CLASS_BAND = 4
 
 #: Bands of features.tif holding chm and vdi (1-indexed for rasterio).
 CANOPY_BANDS = (5, 6)
@@ -221,6 +235,20 @@ class TileDataset(Dataset):
         if not self.tiles:
             raise ValueError(f"no usable tiles for split={split!r} in {dirs}")
 
+        # Which tiles can supply each class, and the mix actually achievable.
+        self._tiles_with: dict[str, list[int]] = {}
+        for i, t in enumerate(self.tiles):
+            for name in t["by_class"]:
+                self._tiles_with.setdefault(name, []).append(i)
+        avail = {k: v for k, v in CLASS_MIX.items() if self._tiles_with.get(k)}
+        total = sum(avail.values())
+        # Renormalise over what exists. The validation band of a tile may hold
+        # no lifecycle way at all, and silently drawing zero of a class is worse
+        # than drawing more of the others.
+        self._mix = {k: v / total for k, v in avail.items()} if total else {}
+        self._mix_names = list(self._mix)
+        self._mix_p = np.array([self._mix[k] for k in self._mix_names])
+
         # Validation draws a fixed crop plan once, so every epoch is scored on
         # exactly the same pixels. Re-rolling them would add sampling noise to
         # the number that decides which checkpoint is kept. The seed is shared
@@ -230,10 +258,19 @@ class TileDataset(Dataset):
             rng = np.random.default_rng(seed)
             self._plan = [self._draw(rng) for _ in range(samples)]
 
-        n_pos = sum(len(t["centres"]) for t in self.tiles)
-        log.info("%s/%s split: %d tiles, %d candidate trail centres, "
-                 "%d px crops -> %d px body", variant.key, split,
-                 len(self.tiles), n_pos, self.crop // self.z_scale, body_crop)
+        n_pos = sum(t["n_centres"] for t in self.tiles)
+        counts = {k: sum(len(self.tiles[i]["by_class"][k])
+                         for i in self._tiles_with.get(k, []))
+                  for k in osm.CLASS_CODE}
+        log.info("%s/%s split: %d tiles, %d centres %s, %d px crops -> %d px body",
+                 variant.key, split, len(self.tiles), n_pos,
+                 {k: v for k, v in counts.items() if v}, self.crop // self.z_scale,
+                 body_crop)
+        missing = [k for k in CLASS_MIX if not self._tiles_with.get(k)]
+        if missing:
+            log.warning("%s split has no %s centres; mix renormalised to %s",
+                        split, "/".join(missing),
+                        {k: round(v, 2) for k, v in self._mix.items()})
         if n_pos == 0:
             log.warning("%s split has no trail pixels -- recall from it is "
                         "meaningless; widen the tiles or check the labels", split)
@@ -262,6 +299,12 @@ class TileDataset(Dataset):
                         d.name, self.crop, self.split, col1 - col0, h)
             return None
 
+        with rasterio.open(lbls) as s:
+            klass = s.read(CLASS_BAND) if s.count >= CLASS_BAND else None
+        if klass is None:
+            log.warning("%s has no class band; run `trailer relabel`", d.name)
+            klass = (target > 0).astype("float32")  # everything reads as active
+
         half = self.crop // 2
         rows, cols = np.nonzero(target[:, col0:col1] > 0)
         cols = cols + col0
@@ -269,14 +312,25 @@ class TileDataset(Dataset):
         keep = ((rows >= half) & (rows < h - half) &
                 (cols >= col0 + half) & (cols < col1 - half))
         rows, cols = rows[keep], cols[keep]
-        if len(rows) > MAX_CENTRES:
-            step = len(rows) // MAX_CENTRES + 1
-            rows, cols = rows[::step], cols[::step]
+
+        # Split the centre pool by class and cap each independently, so a class
+        # holding a few hundred pixels is not strided away alongside one holding
+        # forty thousand.
+        codes = klass[rows, cols]
+        by_class: dict[str, np.ndarray] = {}
+        for name, code in osm.CLASS_CODE.items():
+            m = codes == code
+            r, c = rows[m], cols[m]
+            if len(r) > MAX_CENTRES:
+                step = len(r) // MAX_CENTRES + 1
+                r, c = r[::step], c[::step]
+            if len(r):
+                by_class[name] = np.stack([r, c], axis=1)
 
         return {"name": d.name, "feats": str(feats), "labels": str(lbls),
                 "dtm": str(dtm), "h": h, "w": w, "col0": col0, "col1": col1,
-                "centres": np.stack([rows, cols], axis=1) if len(rows)
-                           else np.zeros((0, 2), dtype=int)}
+                "by_class": by_class,
+                "n_centres": sum(len(v) for v in by_class.values())}
 
     def __getstate__(self) -> dict:
         """Drop unpicklable per-process state before DataLoader ships us out.
@@ -309,13 +363,25 @@ class TileDataset(Dataset):
 
     def _draw(self, rng: np.random.Generator) -> tuple[int, int, int]:
         """Pick (tile index, row, col) for one crop."""
-        ti = int(rng.integers(len(self.tiles)))
-        tile = self.tiles[ti]
         half = self.crop // 2
 
-        centres = tile["centres"]
-        if len(centres) and rng.random() < self.positive_frac:
-            r, c = centres[int(rng.integers(len(centres)))]
+        # Class first, then a tile holding it, then a centre. Picking the tile
+        # first would waste every draw that landed on a tile without the class,
+        # and would re-impose the length imbalance the mix exists to remove.
+        centre = None
+        if self._mix_names and rng.random() < self.positive_frac:
+            name = self._mix_names[int(rng.choice(len(self._mix_names),
+                                                  p=self._mix_p))]
+            pool = self._tiles_with[name]
+            ti = int(pool[int(rng.integers(len(pool)))])
+            centres = self.tiles[ti]["by_class"][name]
+            centre = centres[int(rng.integers(len(centres)))]
+        else:
+            ti = int(rng.integers(len(self.tiles)))
+        tile = self.tiles[ti]
+
+        if centre is not None:
+            r, c = centre
             # Jitter so the trail is not always dead centre, which would let the
             # model cheat on position rather than learn appearance.
             r += rng.integers(-half // 2, half // 2 + 1)
