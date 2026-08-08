@@ -398,6 +398,10 @@ def main(argv=None) -> int:
                    help="max sigma of injected elevation noise in METRES; "
                         "sampled per crop to sweep the tread-to-roughness "
                         "ratio (0 disables)")
+    t.add_argument("--noise-band-m", type=float, default=0.05,
+                   help="max sigma of spatially correlated elevation noise on a "
+                        "4-8 m grid; white noise alone barely reaches the "
+                        "bench-scale band the model keys on (0 disables)")
     t.add_argument("--tolerance-m", type=float, default=5.0,
                    help="relax the region losses at this radius, matching the "
                         "scoring tolerance; 0 trains pixel-exact")

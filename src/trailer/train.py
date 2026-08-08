@@ -38,7 +38,8 @@ def _loaders(dirs: list[Path], variants, cfg) -> dict[str, tuple]:
     for v in variants:
         train = TileDataset(dirs, v, body_crop=cfg.crop, split="train",
                             samples=cfg.samples, augment=True,
-                            noise_m=cfg.noise_m, canopy_dropout=cfg.canopy_dropout,
+                            noise_m=cfg.noise_m, noise_band_m=cfg.noise_band_m,
+                            canopy_dropout=cfg.canopy_dropout,
                             jitter_m=cfg.jitter_m)
         val = TileDataset(dirs, v, body_crop=cfg.crop, split="val",
                           samples=max(cfg.samples // 8, 64), augment=False)

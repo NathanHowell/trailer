@@ -75,6 +75,11 @@ MAX_CENTRES = 20_000
 #: Bands of features.tif holding chm and vdi (1-indexed for rasterio).
 CANOPY_BANDS = (5, 6)
 
+#: Correlation length of the band-limited noise, sampled per crop. Chosen to
+#: straddle the measured 4-9 m bench-and-berm cross-section, so the noise lands
+#: on the same scale as the feature whose SNR it is meant to sweep.
+BAND_NOISE_SCALE_M = (4.0, 8.0)
+
 
 def _boundary(target: np.ndarray, crop: int) -> int:
     """Column separating the train band from the validation band.
@@ -117,6 +122,34 @@ def block_max(a: np.ndarray, k: int) -> np.ndarray:
     return a if k == 1 else _fold(a, k).max(axis=(-3, -1))
 
 
+def band_noise(shape, sigma: float, scale_px: float,
+               rng: np.random.Generator) -> np.ndarray:
+    """Spatially correlated noise: Gaussian on a coarse grid, bilinearly upsampled.
+
+    White noise is the wrong stimulus for this task. Measured on a junction_pass
+    crop, per-pixel noise at sigma=0.05 m moves the tread band mrm_2m by 0.326 of
+    its spread but the bench band mrm_10m by only 0.083 -- it sweeps the SNR of
+    the wrong feature four times harder than the right one. Noise drawn on a
+    4-8 m grid moves mrm_10m just as much (0.074) while barely touching mrm_2m
+    (0.049). Real terrain noise -- talus, gullying, tree throw -- is correlated
+    anyway; white noise models nothing physical at these scales.
+
+    Interpolation is fine here, unlike everywhere else in this file: the
+    no-interpolation rule protects signal from being smoothed away, and this is
+    noise being synthesised, not data being resampled.
+    """
+    from scipy.ndimage import zoom
+
+    k = max(scale_px, 2.0)
+    small = rng.normal(0.0, 1.0, (int(shape[0] / k) + 2, int(shape[1] / k) + 2))
+    up = zoom(small, k, order=1)[:shape[0], :shape[1]]
+    if up.shape != tuple(shape):  # zoom rounds; pad the last row/column
+        pad = [(0, s - u) for s, u in zip(shape, up.shape)]
+        up = np.pad(up, pad, mode="edge")
+    # Bilinear upsampling suppresses variance, so rescale to the sigma asked for.
+    return (up * (sigma / max(up.std(), 1e-9))).astype("float32")
+
+
 def _shift(a: np.ndarray, dr: int, dc: int) -> np.ndarray:
     """Translate an array, filling exposed edges with zero."""
     if dr == 0 and dc == 0:
@@ -152,6 +185,7 @@ class TileDataset(Dataset):
                  body_crop: int = 256, split: str = "train",
                  samples: int = 2000, positive_frac: float = 0.5,
                  augment: bool = True, noise_m: float = 0.05,
+                 noise_band_m: float = 0.05,
                  canopy_dropout: float = 0.15, jitter_m: float = 2.0,
                  seed: int = 1234):
         self.variant = variant
@@ -161,6 +195,7 @@ class TileDataset(Dataset):
         self.positive_frac = positive_frac
         self.augment = augment and split == "train"
         self.noise_m = noise_m
+        self.noise_band_m = noise_band_m
         self.canopy_dropout = canopy_dropout
         self.jitter_m = jitter_m
         self._open: dict[str, tuple] = {}
@@ -324,14 +359,24 @@ class TileDataset(Dataset):
             if rng.random() < 0.5:
                 z, valid, canopy, y, w = (
                     a[..., ::-1] for a in (z, valid, canopy, y, w))
+            # Sweep the signal-to-noise ratio, not just add a fixed jitter.
+            # Terrain noise runs 65 mm in sandy meadow to 500 mm in alpine talus
+            # while tread stays 15-100 mm, so detectability is the ratio -- and
+            # it is the axis the faint trails fail on. A fixed sigma trains one
+            # point on that range; a sampled one covers it.
+            #
+            # Two components, because one does not reach both features. White
+            # noise dominates the tread band and barely touches the 4-9 m
+            # bench-and-berm cross-section the model actually keys on;
+            # band-limited noise does the reverse. Mixing sweeps both.
             if self.noise_m:
-                # Sweep the signal-to-noise ratio, not just add a fixed jitter.
-                # Terrain noise runs 65 mm in sandy meadow to 500 mm in alpine
-                # talus while tread stays 15-100 mm, so detectability is the
-                # ratio -- and it is the axis the faint trails fail on. A fixed
-                # sigma trains one point on that range; a sampled one covers it.
                 sigma = rng.uniform(0.0, self.noise_m)
                 z = z + rng.normal(0, sigma, z.shape).astype("float32")
+            if self.noise_band_m:
+                sigma = rng.uniform(0.0, self.noise_band_m)
+                lo, hi = BAND_NOISE_SCALE_M
+                scale_px = rng.uniform(lo, hi) / self.native_res
+                z = z + band_noise(z.shape, sigma, scale_px, rng)
             if self.variant.canopy and self.canopy_dropout \
                     and rng.random() < self.canopy_dropout:
                 # Canopy structure varies with forest type and region, and the
