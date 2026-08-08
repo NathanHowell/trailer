@@ -10,13 +10,13 @@ overlay a mapper traces over is a different thing entirely.
 ## Status
 
 Data pipeline, survey and training stack are done and run end to end. The
-74-tile build (14 curated + 60 harvested) is complete: 231.9 km of labelled
+74-tile build (14 curated + 60 harvested) is complete: 233.8 km of labelled
 trail, 59 of 60 harvested tiles passing `trailer vet`. No model has been trained
 on the full set yet.
 
 Harvesting was the point of that build, and it worked. Trainable labels went
-from 34.2 km active / 0.98 faint / 0.00 lifecycle to **68.3 / 62.8 / 95.5** — a
-class balance of 30/27/42 instead of 97/3/0.
+from 34.2 km active / 0.98 faint / 0.00 lifecycle to **69.7 / 65.2 / 98.9** — a
+class balance of 30/28/42 instead of 97/3/0.
 
 The model takes **bare-earth elevation in metres**, not pre-computed rasters.
 Terrain derivatives are torch layers inside the graph, so an exported ONNX file
@@ -135,7 +135,8 @@ heavily walked.
 because it lies in quieter terrain (89 mm noise against 159 mm) — which is the
 roughness-as-denominator result appearing inside a single tile. Report faint
 recall separately from headline recall; a single pooled number is close to
-meaningless here.
+meaningless here. Model selection now scores each visibility class separately for
+exactly this reason — see **Selection is stratified** below.
 
 **Lifecycle tags must be labels.** `abandoned:highway`, `disused:highway` and
 friends account for 865 km of mapped-but-faint way in the Sierra. Omitting them
@@ -269,6 +270,26 @@ overlap — a perfect prediction can miss the OSM centreline by three pixels and
 still be exactly what the mapper wants. Pixel AP is reported for comparison with
 the survey baselines, but never used for model selection: it rewards fattening
 predictions until they cover the label slop, and relaxed F1 does not.
+
+**Selection is stratified**, and the warning above about pooled numbers is now
+enforced rather than merely written down. The score a checkpoint is kept on is
+the mean over (input variant × visibility class) of relaxed F1, taken at the best
+threshold in 0.2–0.8 rather than read at 0.5. Two reasons:
+
+* Pooled recall is weighted by labelled kilometres, so it hands the decision to
+  whichever class the corpus holds most of — currently lifecycle, at 98.9 km
+  against faint's 65.2. A model that finds every active metre and no faint one
+  scores 0.97 pooled on the synthetic case in `tests/test_metrics.py`, and 0.50
+  stratified.
+* Where the sigmoid sits drifts between runs, because the output bias is set from
+  the sampled prior and the loss reweights positives. Searching the threshold
+  measures the ranking, which is the model's property; calibration is a
+  deployment choice made later.
+
+Precision is deliberately *not* split by class. A predicted pixel carries no
+class, and a highlight drawn over a real abandoned trail is correct however the
+score is sliced — so each class combines its own recall with the pooled
+precision.
 
 **Splits.** Each training tile reserves a column band for validation, with the
 boundary placed by label quantile rather than at a fixed fraction of width —

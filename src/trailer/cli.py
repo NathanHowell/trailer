@@ -214,12 +214,18 @@ def cmd_train(args) -> int:
     logging.info("train on %d tiles, hold out %d, %.2f m source pixels",
                  len(train_dirs), len(test_dirs), args.res)
     report = train_mod.run(train_dirs, test_dirs, args)
-    print(f"\nbest mean relaxed F1 (val) {report['best_val_f1']:.4f}")
+    print("\nbest stratified relaxed F1 (val, mean over variant x class) "
+          f"{report['best_val_stratified_f1']:.4f}")
     for variant, tiles in report["held_out"].items():
         print(f"  {variant}")
         for name, rec in tiles.items():
+            by = rec["strat"]["by_class"]
+            # Pooled f1 alongside the per-class split, so the two can be
+            # compared on the held-out tiles rather than taken on trust.
             print(f"    {name:22s} f1@0.5 {rec['f1@0.5']:.3f}  "
-                  f"recall {rec['r@0.5']:.3f}  fp {rec['fp_rate@0.5']:.5f}")
+                  f"fp {rec['fp_rate@0.5']:.5f}  " +
+                  " ".join(f"{c[:4]} {by[c]['f1']:.3f}" for c in
+                           rec["strat"]["classes"]))
     return 0
 
 
@@ -332,7 +338,7 @@ def cmd_predict(args) -> int:
         if not (d / "dtm_clean.tif").exists():
             logging.warning("%s not built, skipping", aoi.key)
             continue
-        z, canopy, _, _ = full_tile(d, variant)
+        z, canopy, *_ = full_tile(d, variant)
         with rasterio.open(d / "dtm_clean.tif") as s:
             profile = s.profile
         prob = infer.predict(net, z, canopy, variant=variant.key,
@@ -430,7 +436,9 @@ def main(argv=None) -> int:
                    help="crops drawn per epoch")
     t.add_argument("--lr", type=float, default=3e-4)
     t.add_argument("--pos-weight", type=float, default=8.0,
-                   help="BCE positive class weight; trails are ~0.7% of pixels")
+                   # ArgumentDefaultsHelpFormatter %-formats help strings, so a
+                   # literal percent sign here crashes `train --help`.
+                   help="BCE positive class weight; trails are ~0.7%% of pixels")
     t.add_argument("--cldice", type=float, default=0.5,
                    help="clDice loss weight (0 disables the topology term)")
     t.add_argument("--cldice-warmup", type=int, default=3,

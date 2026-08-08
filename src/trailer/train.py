@@ -4,6 +4,12 @@ Model selection is on relaxed F1 at the 5 m tolerance, not on loss and not on
 pixel AP. AP rewards fattening predictions until they cover the label slop;
 relaxed F1 does not, and it is closer to the question the JOSM reviewer asks.
 
+That F1 is stratified: the score is the mean over (variant x visibility class)
+of the best-threshold relaxed F1, never a pooled number. Pooled recall is
+weighted by labelled kilometres, so it hands the checkpoint decision to whichever
+class the corpus happens to hold most of -- and a corpus is a thing that changes.
+See metrics.Stratified.
+
 The eval-role tiles (abandoned trails) and the control tile are scored only at
 the end of a run, on full tiles with sliding-window inference. They are a test
 set: selecting on them would spend the only honest estimate of abandoned-trail
@@ -21,7 +27,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from . import infer, metrics, model as model_mod
+from . import infer, metrics, model as model_mod, osm
 from .data import TileDataset, full_tile
 from .losses import TrailLoss
 
@@ -71,7 +77,7 @@ def estimate_prior(dataset, n: int = 256) -> float:
     """
     pos = tot = 0
     for i in range(min(n, len(dataset))):
-        _, _, y, w = dataset[i]
+        _, _, y, w, _ = dataset[i]
         m = w > 0
         pos += int((y[m] > 0).sum())
         tot += int(m.sum())
@@ -86,23 +92,28 @@ def _ramp(epoch: int, warmup: int, span: int = 3) -> float:
 
 
 def _forward(net, batch, variant, device):
-    z, canopy, y, w = (t.to(device) for t in batch)
+    z, canopy, y, w, cls = (t.to(device) for t in batch)
     canopy = canopy if canopy.shape[1] else None
-    return net(z, canopy, variant=variant), y, w
+    return net(z, canopy, variant=variant), y, w, cls
 
 
 @torch.no_grad()
 def validate(net, loader, criterion, variant: str, res: float, device) -> dict:
     net.eval()
     agg: dict[str, list] = {}
+    strat = metrics.Stratified(res)
     for batch in loader:
-        logits, y, w = _forward(net, batch, variant, device)
+        logits, y, w, cls = _forward(net, batch, variant, device)
         loss, parts = criterion(logits, y, w, ramp=1.0)
         prob = torch.sigmoid(logits)
+        strat.update(prob, y, w, cls)
         row = {"loss": loss.item(), **parts, **metrics.sweep(prob, y, w, res)}
         for k, v in row.items():
             agg.setdefault(k, []).append(v)
-    return {k: round(float(np.nanmean(v)), 4) for k, v in agg.items()}
+    # Pooled numbers stay for comparability with earlier runs and with the
+    # published baselines; the stratified block is what selection reads.
+    out = {k: round(float(np.nanmean(v)), 4) for k, v in agg.items()}
+    return out | {"strat": strat.result()}
 
 
 def evaluate_tiles(net, dirs: list[Path], variants, res: float, device,
@@ -119,15 +130,18 @@ def evaluate_tiles(net, dirs: list[Path], variants, res: float, device,
         for d in dirs:
             if not (d / "dtm_clean.tif").exists():
                 continue
-            z, canopy, y, w = full_tile(d, v)
+            z, canopy, y, w, cls = full_tile(d, v)
             prob = infer.predict(net, z, canopy, variant=v.key,
                                  body_tile=cfg.crop, device=device,
                                  batch=cfg.batch, tta=cfg.tta)
             n = min(prob.shape[-2], y.shape[-2]), min(prob.shape[-1], y.shape[-1])
-            prob, y, w = (a[..., :n[0], :n[1]] for a in (prob, y, w))
-            pt, yt, wt = (torch.from_numpy(np.ascontiguousarray(a)).unsqueeze(0)
-                          for a in (prob, y, w))
+            prob, y, w, cls = (a[..., :n[0], :n[1]] for a in (prob, y, w, cls))
+            pt, yt, wt, ct = (torch.from_numpy(np.ascontiguousarray(a)).unsqueeze(0)
+                              for a in (prob, y, w, cls))
             rec = metrics.sweep(pt, yt, wt, res)
+            strat = metrics.Stratified(res)
+            strat.update(pt, yt, wt, ct)
+            rec["strat"] = strat.result()
             rec["ap"] = round(metrics.average_precision(prob, y, w), 4)
             rec["fp_rate@0.5"] = round(metrics.false_positive_rate(prob, w), 5)
             rec["positive_frac"] = round(float((y > 0).mean()), 5)
@@ -193,7 +207,7 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
             for v, batch in zip(variants, batches):
                 opt.zero_grad(set_to_none=True)
                 with torch.amp.autocast("cuda", enabled=use_amp):
-                    logits, y, w = _forward(net, batch, v.key, device)
+                    logits, y, w, _ = _forward(net, batch, v.key, device)
                     loss, parts = criterion(logits, y, w, ramp=ramp)
                 if not math.isfinite(loss.item()):
                     log.warning("non-finite loss on %s, skipping", v.key)
@@ -213,25 +227,38 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
                        for vk, r in running.items()}
         val_stats = {v.key: validate(net, loaders[v.key][1], criterion,
                                      v.key, res, device) for v in variants}
-        # Select on the mean across variants. Optimising for the 0.5 m path
-        # alone would quietly let the deployable 1 m one rot, and it is the 1 m
-        # path that a JOSM reviewer actually meets.
-        score = float(np.mean([s.get("f1@0.5", 0.0) for s in val_stats.values()]))
+        # Mean over (variant x visibility class) of best-threshold relaxed F1.
+        #
+        # Across variants, because optimising for the 0.5 m path alone would
+        # quietly let the deployable 1 m one rot, and it is the 1 m path a JOSM
+        # reviewer actually meets. Across classes, because pooled recall is
+        # length-weighted and would let faint trail -- the thing this project is
+        # for -- be traded away for more of what we already detect.
+        score = float(np.mean([s["strat"]["score"] for s in val_stats.values()]))
+        if epoch == 0:
+            for k, s in val_stats.items():
+                gone = [c for c in osm.CLASS_CODE if c not in s["strat"]["classes"]]
+                if gone:
+                    log.warning("%s validation band holds no %s pixels; those "
+                                "classes are absent from the selection score",
+                                k, "/".join(gone))
         history.append({"epoch": epoch, "ramp": round(ramp, 2),
                         "train": train_stats, "val": val_stats,
                         "score": round(score, 4),
                         "seconds": round(time.time() - t0, 1)})
-        log.info("epoch %2d/%d  mean relaxed f1 %.4f  [%s]  %.0fs",
+        log.info("epoch %2d/%d  stratified f1 %.4f  [%s]  %.0fs",
                  epoch + 1, cfg.epochs, score,
-                 "  ".join(f"{k} {s['loss']:.3f}/{s.get('f1@0.5', 0):.3f}"
-                           for k, s in val_stats.items()),
+                 "  ".join(f"{k} {s['loss']:.3f}/" + "/".join(
+                     f"{c[:4]}{s['strat']['by_class'][c]['f1']:.2f}"
+                     for c in s["strat"]["classes"])
+                     for k, s in val_stats.items()),
                  history[-1]["seconds"])
 
         if score > best:
             best = score
             model_mod.save(net, outdir / "best.pt",
                            meta | {"val": val_stats, "epoch": epoch})
-            log.info("  new best (mean relaxed f1 %.4f) -> %s", best,
+            log.info("  new best (stratified f1 %.4f) -> %s", best,
                      outdir / "best.pt")
 
     model_mod.save(net, outdir / "last.pt", meta | {"epoch": cfg.epochs - 1})
@@ -241,7 +268,7 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
     held = evaluate_tiles(net, test_dirs, variants, res, device, cfg)
 
     report = {"config": {k: v for k, v in vars(cfg).items() if k != "fn"},
-              "best_val_f1": round(best, 4), "history": history,
+              "best_val_stratified_f1": round(best, 4), "history": history,
               "held_out": held}
     (outdir / "report.json").write_text(json.dumps(report, indent=1, default=str))
     log.info("wrote %s", outdir / "report.json")

@@ -15,6 +15,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from . import osm
+
 EPS = 1e-6
 
 #: Tolerance in metres for relaxed scoring, matching the ignore-ring radius.
@@ -54,6 +56,98 @@ def sweep(prob: torch.Tensor, y: torch.Tensor, w: torch.Tensor, res: float,
         out[f"r@{t}"] = round(r, 4)
         out[f"f1@{t}"] = round(2 * p * r / (p + r + EPS), 4)
     return out
+
+
+#: Operating points searched when scoring per class. Wider than sweep()'s three
+#: because the best threshold is being looked for, not reported at.
+SELECTION_THRESHOLDS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
+
+
+class Stratified:
+    """Relaxed scoring split by visibility class, accumulated over a whole set.
+
+    Two things this fixes about selecting on pooled ``f1@0.5``.
+
+    *Pooled recall is length-weighted.* Whichever class has the most labelled
+    kilometres in the validation band decides the score, and the model can buy
+    its way to a better number by getting better at the class we already have.
+    Faint trail is the one the project exists for and the one with the worst SNR
+    (median 1.97, p10 0.60 against 5.61 for active); it must not be able to
+    disappear into an average.
+
+    *0.5 is not a fixed point.* The output bias is set from the sampled prior and
+    the loss reweights positives, so where the sigmoid sits moves between runs
+    for reasons that have nothing to do with whether the model ranks pixels well.
+    Selection takes the best F1 over a threshold grid per class, which measures
+    the ranking; calibration is a deployment choice made later.
+
+    Counts are summed across batches and reduced once, rather than scored per
+    batch and averaged. A 256 px crop often holds no pixel of a given class at
+    all, so per-batch recall is frequently 0/0; averaging those makes the score
+    depend on how crops fell into batches, and lets every batch pick its own
+    threshold.
+
+    Precision is deliberately *not* stratified. A predicted pixel does not belong
+    to a class -- and a highlight drawn over a lifecycle trail is not a false
+    positive just because active recall is being measured. So each class's F1
+    combines that class's recall with the pooled precision, which is the honest
+    reading: of everything we drew, how much was trail of any kind.
+    """
+
+    def __init__(self, res: float, classes: tuple[str, ...] | None = None,
+                 thresholds: tuple[float, ...] = SELECTION_THRESHOLDS):
+        self.radius = max(int(round(TOLERANCE_M / res)), 1)
+        self.code = ({c: osm.CLASS_CODE[c] for c in classes} if classes
+                     else dict(osm.CLASS_CODE))
+        self.thresholds = tuple(thresholds)
+        self.y_sum = {c: 0.0 for c in self.code}
+        self.pred_sum = {t: 0.0 for t in self.thresholds}
+        self.tp_p = {t: 0.0 for t in self.thresholds}
+        self.tp_r = {t: {c: 0.0 for c in self.code} for t in self.thresholds}
+
+    @torch.no_grad()
+    def update(self, prob: torch.Tensor, y: torch.Tensor, w: torch.Tensor,
+               cls: torch.Tensor) -> None:
+        valid = (w > 0).to(prob.dtype)
+        # Dilated over all classes: a prediction near any trail is on trail.
+        y_near = _dilate(y, self.radius) * valid
+        per_class = {c: y * valid * (cls == code).to(prob.dtype)
+                     for c, code in self.code.items()}
+        for c, a in per_class.items():
+            self.y_sum[c] += float(a.sum())
+        for t in self.thresholds:
+            pred = (prob >= t).to(prob.dtype) * valid
+            p_near = _dilate(pred, self.radius) * valid
+            self.pred_sum[t] += float(pred.sum())
+            self.tp_p[t] += float((pred * y_near).sum())
+            for c, a in per_class.items():
+                self.tp_r[t][c] += float((a * p_near).sum())
+
+    def result(self) -> dict:
+        """Per-class best F1, and their mean as the selection score.
+
+        Classes with no labelled pixel in the set are dropped, not scored zero:
+        a validation band that happens to contain no lifecycle way says nothing
+        about lifecycle recall, and scoring it zero would make the checkpoint
+        choice depend on that accident.
+        """
+        out: dict[str, dict] = {}
+        for c, ysum in self.y_sum.items():
+            if ysum <= 0:
+                continue
+            best = None
+            for t in self.thresholds:
+                p = self.tp_p[t] / (self.pred_sum[t] + EPS)
+                r = self.tp_r[t][c] / (ysum + EPS)
+                f1 = 2 * p * r / (p + r + EPS)
+                if best is None or f1 > best[0]:
+                    best = (f1, p, r, t)
+            f1, p, r, t = best
+            out[c] = {"f1": round(f1, 4), "p": round(p, 4),
+                      "r": round(r, 4), "t": t}
+        score = float(np.mean([v["f1"] for v in out.values()])) if out else 0.0
+        return {"by_class": out, "score": round(score, 4),
+                "classes": sorted(out)}
 
 
 def average_precision(prob: np.ndarray, y: np.ndarray, w: np.ndarray,

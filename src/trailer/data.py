@@ -146,6 +146,23 @@ def block_max(a: np.ndarray, k: int) -> np.ndarray:
     return a if k == 1 else _fold(a, k).max(axis=(-3, -1))
 
 
+def block_min_nonzero(a: np.ndarray, k: int) -> np.ndarray:
+    """Reduce a class-code plane: the lowest nonzero code in a block wins.
+
+    Not block_max, which would hand every shared body pixel to lifecycle -- the
+    highest code and, since the harvest, the most abundant class. This matches
+    the precedence labels.py burns the plane with, so a body pixel covering two
+    ways is called the same thing whether the overlap happened at label
+    resolution or at this reduction. Zero (background) is excluded rather than
+    winning by being smallest.
+    """
+    if k == 1:
+        return a
+    f = _fold(a, k)
+    out = np.where(f > 0, f, np.inf).min(axis=(-3, -1))
+    return np.where(np.isfinite(out), out, 0.0).astype("float32")
+
+
 def band_noise(shape, sigma: float, scale_px: float,
                rng: np.random.Generator) -> np.ndarray:
     """Spatially correlated noise: Gaussian on a coarse grid, bilinearly upsampled.
@@ -198,11 +215,18 @@ def block_nanmean(a: np.ndarray, k: int) -> np.ndarray:
 class TileDataset(Dataset):
     """Random crops from built AOI directories, for one input variant.
 
-    Each item is ``(z, canopy, y, w)``: elevation in metres at the variant's
-    pixel size, canopy bands (empty for bare-earth variants), and target and
-    weight at ``BODY_RES``. Ignored pixels -- the 2-5 m alignment ring,
-    boardwalks, water, and raster nodata -- arrive as ``w == 0`` rather than as
-    a separate mask, so every loss gets the masking for free by multiplying.
+    Each item is ``(z, canopy, y, w, cls)``: elevation in metres at the variant's
+    pixel size, canopy bands (empty for bare-earth variants), and target, weight
+    and visibility class at ``BODY_RES``. Ignored pixels -- the 2-5 m alignment
+    ring, boardwalks, water, and raster nodata -- arrive as ``w == 0`` rather
+    than as a separate mask, so every loss gets the masking for free by
+    multiplying.
+
+    ``cls`` carries ``osm.CLASS_CODE`` values on trail pixels and 0 elsewhere.
+    No loss reads it -- the model is not asked to tell an active trail from an
+    abandoned one -- but scoring does, so that a checkpoint is chosen on how it
+    does across visibility classes rather than on a pooled number the longest
+    class wins by default.
     """
 
     def __init__(self, dirs: list[Path], variant: var_mod.Variant,
@@ -451,16 +475,21 @@ class TileDataset(Dataset):
                   if self.variant.canopy else
                   np.zeros((0, self.body_crop, self.body_crop), dtype="float32"))
         y, w = lab[0:1], lab[1:2]
+        # Tiles labelled before the class band existed read as all-active rather
+        # than as all-background, so a stale tile degrades the stratification
+        # instead of emptying it. _index already warns about them.
+        cls = (lab[CLASS_BAND - 1:CLASS_BAND] if lab.shape[0] >= CLASS_BAND
+               else (y > 0).astype("float32"))
 
         if self.augment:
             k = int(rng.integers(4))
             if k:
-                z, valid, canopy, y, w = (
+                z, valid, canopy, y, w, cls = (
                     np.rot90(a, k, axes=(-2, -1))
-                    for a in (z, valid, canopy, y, w))
+                    for a in (z, valid, canopy, y, w, cls))
             if rng.random() < 0.5:
-                z, valid, canopy, y, w = (
-                    a[..., ::-1] for a in (z, valid, canopy, y, w))
+                z, valid, canopy, y, w, cls = (
+                    a[..., ::-1] for a in (z, valid, canopy, y, w, cls))
             # Sweep the signal-to-noise ratio, not just add a fixed jitter.
             # Terrain noise runs 65 mm in sandy meadow to 500 mm in alpine talus
             # while tread stays 15-100 mm, so detectability is the ratio -- and
@@ -499,6 +528,7 @@ class TileDataset(Dataset):
 
         y = block_max(y, lk)
         w = block_mean(w, lk)
+        cls = block_min_nonzero(cls, lk)
         # A body pixel is trainable only if it was fully covered by real ground.
         w = w * (block_mean(valid.astype("float32"), vk) > 0.999)
 
@@ -513,10 +543,10 @@ class TileDataset(Dataset):
             r = self.jitter_m / var_mod.BODY_RES
             dr = int(round(rng.uniform(-r, r)))
             dc = int(round(rng.uniform(-r, r)))
-            y, w = (_shift(a, dr, dc) for a in (y, w))
+            y, w, cls = (_shift(a, dr, dc) for a in (y, w, cls))
 
         return tuple(torch.from_numpy(np.ascontiguousarray(a))
-                     for a in (z, canopy, y, w))
+                     for a in (z, canopy, y, w, cls))
 
 
 def full_tile(d: Path, variant: var_mod.Variant,
@@ -555,8 +585,21 @@ def full_tile(d: Path, variant: var_mod.Variant,
         lab = s.read().astype("float32")
     y = block_max(lab[0:1], lk)
     w = block_mean(lab[1:2], lk)
+    cls = block_min_nonzero(
+        lab[CLASS_BAND - 1:CLASS_BAND] if lab.shape[0] >= CLASS_BAND
+        else (lab[0:1] > 0).astype("float32"), lk)
     w = w * (block_mean(valid.astype("float32"), vk) > 0.999)
-    n0 = min(z.shape[-2], y.shape[-2])
-    n1 = min(z.shape[-1], y.shape[-1])
-    return (z[..., :n0, :n1], canopy[..., :n0, :n1],
-            y[..., :n0, :n1], w[..., :n0, :n1])
+
+    # Trim to a common footprint, counted in BODY pixels. Elevation is at the
+    # variant's pixel size and the labels are at the body's, so a plain
+    # min(z.shape, y.shape) is not comparing like with like: at 0.5 m it cut z to
+    # the label count and handed inference the top-left QUARTER of the tile while
+    # scoring it against labels for all of it. Only a quarter of every held-out
+    # tile was evaluated for sub-metre variants, and the 0.5-vs-1 m comparison --
+    # the number that says what our own point clouds are worth over the public
+    # DEM -- was measured over different ground for each.
+    k = int(round(var_mod.BODY_RES / variant.res))
+    n0 = min(z.shape[-2] // k, y.shape[-2])
+    n1 = min(z.shape[-1] // k, y.shape[-1])
+    return (z[..., :n0 * k, :n1 * k], canopy[..., :n0 * k, :n1 * k],
+            y[..., :n0, :n1], w[..., :n0, :n1], cls[..., :n0, :n1])

@@ -82,15 +82,25 @@ def build(elements: list[dict], reference_tif, out_tif, epsg: str) -> dict:
     target = burn([l.buffer(POSITIVE_M) for l, _, _ in trails])
     near = burn([l.buffer(IGNORE_M) for l, _, _ in trails])
 
-    # Class plane, burned low code first so a rarer class wins any overlap.
+    # Class plane. Where two ways of different classes overlap -- 5078 pixels,
+    # 0.12% of the corpus, and 4377 of them active-against-lifecycle, i.e. an
+    # abandoned alignment running beside the trail that replaced it -- the LOWEST
+    # code wins, so the pixel is called active rather than lifecycle.
+    #
+    # This used to be np.maximum over a low-code-first burn, which is the same
+    # rule read backwards: the highest code won, while the comment claimed the
+    # opposite. Small either way (it moved 0.24% of lifecycle pixels and 0.06% of
+    # faint), but in the wrong direction: it let a class inherit pixels where a
+    # maintained trail is what actually lies on the ground, and stratified
+    # selection now reads this plane to decide which checkpoint ships.
     klass = np.zeros(shape, dtype="float32")
     by_class: dict[str, list] = {}
     for line, _, v in trails:
         by_class.setdefault(v, []).append(line.buffer(POSITIVE_M))
     for name in osm.VISIBILITY_CLASSES:
         if name in by_class:
-            code = osm.CLASS_CODE[name]
-            klass = np.maximum(klass, burn(by_class[name]) * code)
+            hit = (burn(by_class[name]) > 0) & (klass == 0)
+            klass = np.where(hit, osm.CLASS_CODE[name], klass)
 
     # Weight plane: max weight of any trail covering the pixel. Group by value
     # first -- there are only a handful of distinct weights, and rasterising
