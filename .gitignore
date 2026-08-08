@@ -177,3 +177,8 @@ data/
 # JOSM plugin build output
 plugin/target/
 plugin/dependency-reduced-pom.xml
+
+# Training runs: 94 MB per checkpoint, and every one is reproducible from a
+# commit hash plus `just retrain`. runs/baseline/best.pt reached history before
+# this rule existed (twice, ~190 MB of the pack); see the note in README.
+runs/
