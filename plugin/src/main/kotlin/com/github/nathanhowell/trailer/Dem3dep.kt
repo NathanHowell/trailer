@@ -88,6 +88,17 @@ object Dem3dep {
     }
 
     /**
+     * Sample spacing for the completeness test, in metres, and the grid bounds it
+     * is clamped to. See [coveredFraction] for what this buys and what it misses.
+     */
+    const val COVERAGE_STEP_M = 50.0
+    const val COVERAGE_MIN_SAMPLES = 16
+    const val COVERAGE_MAX_SAMPLES = 128
+
+    /** A window is complete enough to run on only if every sample is backed. */
+    const val MIN_COVERED_FRACTION = 1.0
+
+    /**
      * What the service would actually serve here, from its own catalog.
      *
      * Deliberately metadata rather than a content test. A content-based detector
@@ -97,16 +108,32 @@ object Dem3dep {
      * against 0.10–0.16 for 10 m-upsampled). The published 1 m product is itself
      * hydro-flattened and interpolated, so its 1 m detail band is already weak
      * enough to look like something upsampled. The catalog just says.
+     *
+     * [bestPixelSizeM] alone is not enough, which is why [coveredFraction] exists.
+     * It is a minimum over rasters *intersecting* the window, so a view straddling
+     * the edge of a LiDAR project reports 1.0 m on the strength of a raster that
+     * clips one corner. Measured on a real 2 km window at the west edge of the
+     * Oregon project near 421000E 4914000N: `LowPS` 1.0, and 76% of the window
+     * served from the 10.3 m fallback. At 1 km the same window is 1.0 m by
+     * `LowPS` and *nothing* by area.
      */
     data class Coverage(val bestPixelSizeM: Double, val title: String?,
-                        val sourceCount: Int) {
-        val usable get() = bestPixelSizeM <= MAX_SOURCE_PIXEL_M
+                        val sourceCount: Int, val coveredFraction: Double) {
+        val fineEnough get() = bestPixelSizeM <= MAX_SOURCE_PIXEL_M
+        val complete get() = coveredFraction >= MIN_COVERED_FRACTION
+        val usable get() = fineEnough && complete
     }
 
     class UnsupportedCoverage(val coverage: Coverage) : Exception(
-        "3DEP serves ${"%.1f".format(coverage.bestPixelSizeM)} m here " +
-            "(${coverage.title ?: "unknown source"}); trail detection needs 1 m " +
-            "LiDAR and will not run on resampled data")
+        if (!coverage.fineEnough)
+            "3DEP serves ${"%.1f".format(coverage.bestPixelSizeM)} m here " +
+                "(${coverage.title ?: "unknown source"}); trail detection needs " +
+                "1 m LiDAR and will not run on resampled data"
+        else
+            "only ${"%.0f".format(coverage.coveredFraction * 100)}% of this view " +
+                "has 1 m LiDAR (${coverage.title ?: "unknown source"}); the rest " +
+                "is resampled from a coarser source. Zoom in past the edge of the " +
+                "LiDAR project and try again")
 
     // ---------------------------------------------------------------- queries
 
@@ -144,15 +171,126 @@ object Dem3dep {
             "spatialRel" to "esriSpatialRelIntersects",
             "where" to "Category = 1",   // primary rasters, not overview pyramids
             "outFields" to "LowPS,title",
-            "returnGeometry" to "false",
+            // Footprints, not just pixel sizes: intersecting is not covering, and
+            // without the geometry there is no way to tell the difference.
+            "returnGeometry" to "true",
+            // In the same SR as the window, so the rings are comparable to it.
+            "outSR" to "$epsg",
             "f" to "json",
         ))
     }
 
     // ---------------------------------------------------------------- parsing
 
-    /** Smallest `LowPS` among the primary rasters covering the window. */
-    fun parseCoverage(json: String): Coverage {
+    /**
+     * A catalog footprint: rings of projected vertices, plus a bbox to reject on.
+     *
+     * ArcGIS densifies the edges — a 10 km raster comes back as an 85-vertex ring
+     * — so these are not four-corner rectangles even when the footprint is one.
+     * Requested in the window's own SR they are axis-aligned; reprojected across
+     * a UTM zone they bow by ~600 m over 10 km, which is why the test below works
+     * on the rings themselves and never on their bounding boxes.
+     */
+    private class Footprint(val rings: List<DoubleArray>) {
+        var minX = Double.MAX_VALUE; var minY = Double.MAX_VALUE
+        var maxX = -Double.MAX_VALUE; var maxY = -Double.MAX_VALUE
+
+        init {
+            for (r in rings) {
+                var i = 0
+                while (i < r.size) {
+                    if (r[i] < minX) minX = r[i]
+                    if (r[i] > maxX) maxX = r[i]
+                    if (r[i + 1] < minY) minY = r[i + 1]
+                    if (r[i + 1] > maxY) maxY = r[i + 1]
+                    i += 2
+                }
+            }
+        }
+
+        /** Even-odd ray crossing, so an interior ring reads as a hole. */
+        fun contains(x: Double, y: Double): Boolean {
+            if (x < minX || x > maxX || y < minY || y > maxY) return false
+            var odd = false
+            for (r in rings) {
+                val n = r.size / 2
+                var j = n - 1
+                for (i in 0 until n) {
+                    val yi = r[2 * i + 1]
+                    val yj = r[2 * j + 1]
+                    if ((yi > y) != (yj > y)) {
+                        val xi = r[2 * i]
+                        val xj = r[2 * j]
+                        if (x < xi + (y - yi) * (xj - xi) / (yj - yi)) odd = !odd
+                    }
+                    j = i
+                }
+            }
+            return odd
+        }
+    }
+
+    private fun footprint(f: JsonNode): Footprint? {
+        val rings = f.path("geometry").path("rings")
+        if (!rings.isArray || rings.isEmpty) return null
+        val out = ArrayList<DoubleArray>(rings.size())
+        for (ring in rings) {
+            if (!ring.isArray || ring.size() < 3) continue
+            val a = DoubleArray(ring.size() * 2)
+            var i = 0
+            for (p in ring) {
+                if (p.size() < 2) return null
+                a[i++] = p.get(0).asDouble()
+                a[i++] = p.get(1).asDouble()
+            }
+            out.add(a)
+        }
+        return if (out.isEmpty()) null else Footprint(out)
+    }
+
+    /**
+     * Fraction of [bounds] backed by a footprint at or below [MAX_SOURCE_PIXEL_M].
+     *
+     * Sampled on a grid whose endpoints are inclusive, so the window's corners and
+     * edges are tested — that is where a project boundary actually clips a view.
+     * Spacing is [COVERAGE_STEP_M] clamped to [COVERAGE_MIN_SAMPLES]..
+     * [COVERAGE_MAX_SAMPLES] per axis, i.e. at worst 62 m across a full-size 8 km
+     * request.
+     *
+     * What this misses, stated plainly: an uncovered strip narrower than the
+     * spacing and falling between samples. That is not the failure this guards
+     * against. Real gaps are LiDAR project boundaries, which are kilometres
+     * across; the seams *inside* a project are not gaps at all, since adjacent
+     * 10 km tiles are published with about 7 m of overlap.
+     *
+     * A feature with no usable ring contributes nothing, so a service that ignores
+     * `returnGeometry` reads as no coverage rather than as full coverage.
+     */
+    private fun coveredFraction(features: List<JsonNode>, bounds: Bounds): Double {
+        val prints = features.mapNotNull { footprint(it) }
+        if (prints.isEmpty()) return 0.0
+        val nx = samplesAcross(bounds.width)
+        val ny = samplesAcross(bounds.height)
+        var hit = 0
+        for (i in 0 until nx) {
+            val x = bounds.minX + bounds.width * i / (nx - 1.0)
+            for (j in 0 until ny) {
+                val y = bounds.minY + bounds.height * j / (ny - 1.0)
+                if (prints.any { it.contains(x, y) }) hit++
+            }
+        }
+        return hit.toDouble() / (nx * ny)
+    }
+
+    private fun samplesAcross(span: Double): Int =
+        Math.ceil(span / COVERAGE_STEP_M).toInt().coerceIn(
+            COVERAGE_MIN_SAMPLES, COVERAGE_MAX_SAMPLES)
+
+    /**
+     * Smallest `LowPS` among the primary rasters intersecting the window, and how
+     * much of the window the fine ones actually cover.
+     */
+    fun parseCoverage(json: String, bounds: Bounds): Coverage {
         val root: JsonNode = mapper.readTree(json)
         root.get("error")?.let {
             throw IllegalStateException("3DEP catalog error: ${it.toString().take(300)}")
@@ -160,17 +298,20 @@ object Dem3dep {
         var best: JsonNode? = null
         var bestPs = Double.MAX_VALUE
         var n = 0
+        val fine = ArrayList<JsonNode>()
         for (f in root.path("features")) {
             val ps = f.path("attributes").path("LowPS")
             if (!ps.isNumber) continue
             n++
+            if (ps.asDouble() <= MAX_SOURCE_PIXEL_M) fine.add(f)
             if (ps.asDouble() < bestPs) {
                 bestPs = ps.asDouble()
                 best = f
             }
         }
-        if (best == null) return Coverage(Double.MAX_VALUE, null, 0)
-        return Coverage(bestPs, best.path("attributes").path("title").asText(null), n)
+        if (best == null) return Coverage(Double.MAX_VALUE, null, 0, 0.0)
+        return Coverage(bestPs, best.path("attributes").path("title").asText(null),
+                        n, coveredFraction(fine, bounds))
     }
 
     /**
@@ -230,7 +371,8 @@ object Dem3dep {
             .content.use { it.readBytes() }
 
     fun coverage(bounds: Bounds, epsg: Int): Coverage =
-        parseCoverage(String(get(catalogUrl(bounds, epsg), 90_000), Charsets.UTF_8))
+        parseCoverage(String(get(catalogUrl(bounds, epsg), 90_000), Charsets.UTF_8),
+                      bounds)
 
     /**
      * Elevation for a window, at [width] x [height] samples.
