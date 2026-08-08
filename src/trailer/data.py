@@ -148,6 +148,16 @@ class TileDataset(Dataset):
                 "centres": np.stack([rows, cols], axis=1) if len(rows)
                            else np.zeros((0, 2), dtype=int)}
 
+    def __getstate__(self) -> dict:
+        """Drop unpicklable per-process state before DataLoader ships us out.
+
+        Rasterio dataset handles wrap a C pointer and cannot be pickled. Anything
+        that touches the dataset in the parent -- estimating the label prior, for
+        instance -- populates the handle cache, and the first worker launch then
+        dies trying to serialise it. Workers reopen lazily anyway.
+        """
+        return self.__dict__ | {"_open": {}, "_rng": None}
+
     def __len__(self) -> int:
         return self.samples
 
