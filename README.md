@@ -340,6 +340,14 @@ stems' BatchNorm. The one op with no ONNX equivalent is the median filter;
 k = 3, 4, 10, 20, including the lower-median convention for even k. A round trip
 through onnxruntime on real elevation matches torch to 2.7e-6.
 
+The plugin's whole-raster path — reflect-pad, tile, run, blend, crop — is
+checked end to end against `infer.predict` on the same weights, not step by
+step: **3.9e-7** across a finished raster, where shifting one window by a single
+column moves it by **1.0**. The fixture runs a 2.6 KB stand-in graph rather than
+the 99 MB trained one, since what is under test is the tiling and the session
+plumbing, and it covers a stride-2 variant as well as the deployable stride-1
+one so the body-grid division is exercised by something.
+
 ## Licensing
 
 Two artefacts, two licences, on purpose.

@@ -29,8 +29,154 @@ DEFAULT_OUT = Path("plugin/src/test/resources/golden.json")
 PAD_CASES = ((100, 64, 32), (64, 64, 32), (50, 64, 32), (129, 64, 32),
              (1121, 256, 128), (200, 128, 64), (65, 64, 32))
 
+#: Whole-tile parity cases: (variant, body tile, raster height, raster width).
+#:
+#: Both rasters are ragged on both axes, so the reflect-padded tail is inside
+#: the compared region rather than off the end of it. ``dem1`` is the case that
+#: ships. ``lidar05`` is stride 2, where a window origin has to be divided down
+#: to the body grid -- the arithmetic that a Kotlin-only test would have had no
+#: way to check, and the exact shape of the step bug this project already found
+#: once. No stride-2 variant is deployable (they all need canopy bands, which no
+#: elevation service provides), so without this case that division would ship
+#: never having been run against Python at all.
+TILE_CASES = (("dem1", 32, 70, 54), ("lidar05", 32, 140, 108))
 
-def build() -> dict:
+
+def _stub_conv(stride: int):
+    """A fixed 3x3 convolution standing in for the trained network.
+
+    Deliberately asymmetric in both axes, so a window that lands one pixel off,
+    or transposed, cannot agree by symmetry. It has a receptive field on purpose
+    too: a 1x1 kernel would make each output depend only on the co-located input
+    and a misregistration would show only as a shift, which is much easier to
+    accidentally reproduce on both sides than a wrong *value*.
+    """
+    import torch
+
+    conv = torch.nn.Conv2d(1, 1, 3, stride=stride, padding=1, bias=True)
+    conv.weight.data = torch.tensor(
+        [[-0.70, 0.15, 0.40],
+         [0.05, 1.30, -0.25],
+         [0.60, -0.90, 0.20]]).reshape(1, 1, 3, 3)
+    conv.bias.data = torch.tensor([-0.35])
+    return conv
+
+
+def _stub_net(stride: int):
+    """What ``infer.predict`` sees: called as ``model(z, canopy, variant=...)``,
+    returning *logits*, because ``predict`` applies the sigmoid itself."""
+    import torch
+
+    class StubNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = _stub_conv(stride)
+
+        def forward(self, z, canopy=None, variant=None):
+            # Canopy is accepted and ignored. The 0.5 m variants need it to
+            # exist so `predict` will run them, but nothing deployable has it,
+            # and this case is here for the stride arithmetic rather than the
+            # bands.
+            return self.conv(z)
+
+    return StubNet()
+
+
+def _stub_deployable(net):
+    """What the plugin sees: the same weights behind the exported contract.
+
+    Mirrors ``model.Deployable`` -- sigmoid applied inside, taper as a second
+    output -- so the ONNX the plugin runs and the module ``infer.predict`` runs
+    are the same arithmetic reached two different ways. That is the whole point:
+    if the export or the Kotlin tiling disagrees, these two stop matching.
+    """
+    import torch
+
+    from . import infer
+
+    class StubDeployable(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = net
+
+        def forward(self, z):
+            p = torch.sigmoid(self.net(z))
+            taper = infer.hann2d(p.shape[-1], p.device, p.dtype)
+            return p, taper.expand_as(p)
+
+    return StubDeployable()
+
+
+def _terrain(h: int, w: int, seed: int):
+    """Deterministic pseudo-elevation: a tilted plane plus noise.
+
+    Tilted so the raster is asymmetric under both flips and the transpose, and
+    in metres rather than normalised, because that is what the real input is.
+    """
+    rng = np.random.default_rng(seed)
+    ramp = (np.linspace(0.0, 40.0, h)[:, None]
+            + np.linspace(0.0, 25.0, w)[None, :])
+    return (ramp + rng.standard_normal((h, w)) * 3.0).astype("float32")
+
+
+def _tile_case(variant: str, body: int, h: int, w: int, out_dir: Path,
+               overlap: float = 0.5) -> dict:
+    import torch
+
+    from . import infer
+    from . import model as model_mod
+    from . import variants as var_mod
+
+    v = var_mod.get(variant)
+    tile = body * v.stride
+    net = _stub_net(v.stride).eval()
+
+    z = _terrain(h, w, seed=20260808 + h)
+    # Ignored by the stub, but `predict` refuses to run a canopy variant
+    # without it. Zeros, because what this case is testing is the stride
+    # division, not the bands.
+    canopy = (np.zeros((2, h, w), dtype="float32") if v.canopy else None)
+
+    with torch.no_grad():
+        prob = infer.predict(net, z[None], canopy=canopy, variant=variant,
+                             body_tile=body, overlap=overlap, device="cpu")
+
+    onnx_name = f"stub-{variant}.onnx"
+    with torch.no_grad():
+        torch.onnx.export(
+            _stub_deployable(net).eval(),
+            (torch.zeros(1, 1, tile, tile),),
+            str(out_dir / onnx_name),
+            input_names=["elevation_m"],
+            output_names=["trail_probability", "window_taper"],
+            opset_version=17)
+
+    # Shaped exactly like a real export sidecar, and the numbers come from the
+    # same `window_step` and the same variant table, so ModelSpec validates it
+    # the same way. The real sidecars are checked against a real export in
+    # ModelSpecTest; this one only has to be a valid contract.
+    sidecar = {
+        "variant": variant, "res_m": v.res, "out_res_m": var_mod.BODY_RES,
+        "input_px": tile, "output_px": body, "stride": v.stride,
+        "overlap": overlap,
+        "step_px": infer.window_step(tile, overlap, v.stride),
+        "pad_mode": "reflect", "tta": False,
+        "outputs": ["trail_probability", "window_taper"],
+        "license": model_mod.MODEL_LICENSE,
+        "attribution": model_mod.MODEL_ATTRIBUTION,
+    }
+    (out_dir / f"stub-{variant}.json").write_text(json.dumps(sidecar, indent=1))
+
+    return {
+        "variant": variant, "onnx": onnx_name, "sidecar": f"stub-{variant}.json",
+        "h": h, "w": w, "body_tile": body, "stride": v.stride,
+        "z": z.flatten().tolist(),
+        "out_h": h // v.stride, "out_w": w // v.stride,
+        "out": prob[0].flatten().tolist(),
+    }
+
+
+def build(out_dir: Path = DEFAULT_OUT.parent) -> dict:
     import torch
     import torch.nn.functional as F
 
@@ -79,14 +225,26 @@ def build() -> dict:
                   "windows": [{"row": r, "col": c} for r, c in wins],
                   "probs": [p.flatten().tolist() for p in probs],
                   "out": (acc / np.maximum(den, 1e-6)).flatten().tolist()}
+
+    # Whole-tile parity: the one fixture that runs the *entire* path rather
+    # than a piece of it. Everything above tests one function against Python;
+    # this runs a real onnxruntime session under the Kotlin tiler and compares
+    # the finished raster to what `infer.predict` produced from the same
+    # weights. It is the only fixture that would catch the two sides each being
+    # individually correct and still disagreeing when composed.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    g["tiles"] = [_tile_case(variant, body, h, w, out_dir)
+                  for variant, body, h, w in TILE_CASES]
     return g
 
 
 def write(out: Path = DEFAULT_OUT) -> Path:
-    g = build()
+    g = build(out.parent)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(g))
-    log.info("wrote %s: hann %dx%d, %d pad cases, blend %dx%d over %d windows",
+    log.info("wrote %s: hann %dx%d, %d pad cases, blend %dx%d over %d windows, "
+             "%d whole-tile cases (%s)",
              out, g["hann_size"], g["hann_size"], len(g["pad_cases"]),
-             g["blend"]["h"], g["blend"]["w"], len(g["blend"]["windows"]))
+             g["blend"]["h"], g["blend"]["w"], len(g["blend"]["windows"]),
+             len(g["tiles"]), ", ".join(t["variant"] for t in g["tiles"]))
     return out

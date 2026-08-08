@@ -1,0 +1,18 @@
+{
+ "variant": "lidar05",
+ "res_m": 0.5,
+ "out_res_m": 1.0,
+ "input_px": 64,
+ "output_px": 32,
+ "stride": 2,
+ "overlap": 0.5,
+ "step_px": 32,
+ "pad_mode": "reflect",
+ "tta": false,
+ "outputs": [
+  "trail_probability",
+  "window_taper"
+ ],
+ "license": "CC-BY-SA-4.0",
+ "attribution": "Trail probability model (c) 2026 Nathan Howell, CC BY-SA 4.0. Trained on trail geometry from OpenStreetMap (c) OpenStreetMap contributors, available under the Open Database Licence (ODbL). Elevation from the USGS 3D Elevation Program (3DEP), a work of the United States government and in the public domain."
+}
