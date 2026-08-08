@@ -104,18 +104,21 @@ check-corpus:
     root = Path("{{root}}")
     problems = []
 
-    # A tile vet rejected is still on disk until `just vet-apply` runs, and the
-    # training set reads the registry, not the verdicts.
+    train_dirs = _built(root, "train", "harvest")
+
+    # A vet rejection has no effect until `just vet-apply` rewrites the registry.
+    # Ask what the TRAINER will load, not what is on disk: vet-apply drops the
+    # registry entry and leaves the files alone unless --prune is passed, so
+    # globbing for labels.tif reports a tile that is already excluded.
     vet = root / "vet.json"
     if vet.exists():
-        built = {p.parent.name for p in root.glob("*/labels.tif")}
+        names = {d.name for d in train_dirs}
         bad = [r["key"] for r in json.loads(vet.read_text())
-               if not r.get("accepted") and r["key"] in built]
+               if not r.get("accepted") and r["key"] in names]
         if bad:
-            problems.append(f"vet-rejected tiles still in the corpus: {bad} "
-                            "-- run `just vet-apply`")
+            problems.append(f"vet-rejected tiles still in the training set: "
+                            f"{bad} -- run `just vet-apply`")
 
-    train_dirs = _built(root, "train", "harvest")
     if not train_dirs:
         problems.append("no built training tiles")
     for key in "{{variants}}".split(","):
