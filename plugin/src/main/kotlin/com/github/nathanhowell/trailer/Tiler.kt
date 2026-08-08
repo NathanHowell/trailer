@@ -48,8 +48,13 @@ object Tiler {
         return out
     }
 
-    /** Step between window origins for a given overlap fraction. */
-    fun step(tile: Int, overlap: Double): Int = max((tile * (1.0 - overlap)).toInt(), 1)
+    // There is deliberately no `step(tile, overlap)` here. The step depends on
+    // the stem's stride as well as the overlap, and an origin that is not a
+    // multiple of the stride lands between output pixels — a misregistration
+    // that is worst at nothing in particular and so reads as general softening.
+    // Kotlin computed it once, without the stride quantisation, and disagreed
+    // with Python at overlap 0.7. It now comes from [ModelSpec.stepPx], which
+    // carries the number `infer.window_step` produced at export time.
 
     /**
      * Padding needed on one axis so windows tile it exactly.

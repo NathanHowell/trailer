@@ -202,7 +202,8 @@ class Deployable(nn.Module):
         return torch.sigmoid(self.body(self.stem(z)))
 
 
-def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256) -> dict:
+def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256,
+                overlap: float = 0.5) -> dict:
     """Freeze one variant to ONNX. Canopy variants are not deployable this way.
 
     The window is fixed rather than dynamic. That is a real constraint of the
@@ -211,7 +212,14 @@ def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256) -> dict:
     H and W. It costs nothing, because the plugin has to tile with a Hann-
     tapered overlapping window regardless -- the same thing ``infer.predict``
     does -- so a fixed window is what it wants anyway.
+
+    The returned dict is written beside the ``.onnx`` and is a *contract*, not
+    documentation. Every number the caller needs in order to tile correctly is
+    here as a number, computed by the same code that ``infer.predict`` runs, so
+    a second implementation reads them instead of re-deriving them. Prose in this
+    dict was how the plugin came to disagree with Python about the window step.
     """
+    from . import infer
     v = var_mod.get(variant)
     if v.canopy:
         raise ValueError(f"{variant!r} needs canopy bands, which no raster "
@@ -227,12 +235,21 @@ def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256) -> dict:
     torch.onnx.export(model, (torch.zeros(1, 1, n, n),), str(path),
                       input_names=["elevation_m"],
                       output_names=["trail_probability"], opset_version=17)
-    return {"variant": variant, "res_m": v.res, "out_res_m": var_mod.BODY_RES,
-            "input_px": n, "output_px": size,
-            "input": "single-band float32 bare-earth elevation in metres, "
-                     "NaN for nodata",
-            "output": f"trail probability at {var_mod.BODY_RES:g} m",
-            "tiling": "overlap windows and blend; edges are untapered here"}
+    return {
+        "variant": variant,
+        "res_m": v.res,
+        "out_res_m": var_mod.BODY_RES,
+        "input_px": n,
+        "output_px": size,
+        # Everything below this line is what a tiler needs, as numbers.
+        "stride": v.stride,
+        "overlap": overlap,
+        "step_px": infer.window_step(n, overlap, v.stride),
+        "pad_mode": "reflect",
+        "input": "single-band float32 bare-earth elevation in metres, "
+                 "NaN for nodata",
+        "output": f"trail probability at {var_mod.BODY_RES:g} m",
+    }
 
 
 def pick_device(requested: str | None = None) -> torch.device:

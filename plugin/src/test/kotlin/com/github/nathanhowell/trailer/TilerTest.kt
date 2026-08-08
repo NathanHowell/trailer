@@ -115,7 +115,7 @@ class TilerTest {
         // normalisation is wrong, a uniform prediction comes back non-uniform and
         // the whole overlay picks up a grid of seams.
         val tile = 8
-        val step = Tiler.step(tile, 0.5)
+        val step = 4
         val h = 24
         val w = 24
         val blender = Tiler.Blender(h, w, tile)
@@ -125,11 +125,8 @@ class TilerTest {
         assertClose(FloatArray(h * w) { 0.375f }, out, 1e-5f, "constant field")
     }
 
-    @Test
-    fun `step follows overlap fraction`() {
-        assertEquals(128, Tiler.step(256, 0.5))
-        assertEquals(64, Tiler.step(256, 0.75))
-        assertEquals(256, Tiler.step(256, 0.0))
-        assertTrue(Tiler.step(256, 1.0) >= 1) { "step must never be zero" }
-    }
+    // The step is no longer computed here, so there is nothing left to test: it
+    // arrives as a number in the model sidecar. The test that used to live here
+    // asserted Kotlin's own arithmetic against Kotlin's own expectations and
+    // agreed with itself while disagreeing with Python. See ModelSpecTest.
 }

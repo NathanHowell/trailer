@@ -38,6 +38,23 @@ def _pad_to(n: int, tile: int, step: int) -> int:
     return max(tile - n, 0) + (-(n - tile) % step if n > tile else 0)
 
 
+def window_step(tile: int, overlap: float, stride: int) -> int:
+    """Distance between window origins, in the *input's* pixels.
+
+    Quantised to the stem's stride, and floored at it. Both matter: an origin
+    that is not a multiple of the stride lands between output pixels, so the
+    window's predictions would be accumulated half a body pixel off from where
+    they belong -- a misregistration that grows no worse at the tile's centre and
+    is therefore invisible except as a general softening.
+
+    Defined here, and exported into the model's sidecar by ``export_onnx``, so
+    the plugin reads the number rather than reimplementing this line. It already
+    reimplemented it wrongly once: Kotlin had neither the quantisation nor the
+    floor, and disagreed at overlap 0.7 with a stride-2 stem.
+    """
+    return max(int(tile * (1 - overlap)) // stride * stride, stride)
+
+
 @torch.no_grad()
 def predict(model, z: np.ndarray, canopy: np.ndarray | None = None,
             variant: str | None = None, body_tile: int = 256,
@@ -60,7 +77,7 @@ def predict(model, z: np.ndarray, canopy: np.ndarray | None = None,
     tile = body_tile * stride
 
     _, h, w = z.shape
-    step = max(int(tile * (1 - overlap)) // stride * stride, stride)
+    step = window_step(tile, overlap, stride)
     pad_h, pad_w = _pad_to(h, tile, step), _pad_to(w, tile, step)
 
     # Reflect-pad so windows tile exactly and edges keep real context. NaN
