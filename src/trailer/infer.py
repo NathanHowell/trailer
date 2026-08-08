@@ -33,47 +33,72 @@ def _d4_inv(x: torch.Tensor, k: int, flip: bool) -> torch.Tensor:
     return torch.flip(x, dims=(-1,)) if flip else x
 
 
+def _pad_to(n: int, tile: int, step: int) -> int:
+    """Extra rows/cols so windows of ``tile`` tile the axis exactly."""
+    return max(tile - n, 0) + (-(n - tile) % step if n > tile else 0)
+
+
 @torch.no_grad()
-def predict(model, x: np.ndarray, tile: int = 384, overlap: float = 0.5,
-            device=None, batch: int = 8, tta: bool = False) -> np.ndarray:
-    """Run a model over a (C, H, W) feature stack. Returns (1, H, W) probs."""
+def predict(model, z: np.ndarray, canopy: np.ndarray | None = None,
+            variant: str | None = None, body_tile: int = 256,
+            overlap: float = 0.5, device=None, batch: int = 8,
+            tta: bool = False) -> np.ndarray:
+    """Run a model over a (1, H, W) elevation raster in metres.
+
+    Windows are stepped in the *input's* pixels but accumulated in the trunk's,
+    since the model predicts at ``BODY_RES`` whatever it was fed. Returns
+    ``(1, H // stride, W // stride)`` probabilities.
+    """
+    from . import variants as var_mod
+
     device = device or next(model.parameters()).device
     model.eval()
+    v = var_mod.get(variant) if variant else next(iter(model.stems.values())).variant
+    if isinstance(v, str):
+        v = var_mod.get(v)
+    stride = v.stride
+    tile = body_tile * stride
 
-    c, h, w = x.shape
-    # Reflect-pad so windows tile exactly and edges keep real context.
-    pad_h = max(tile - h, 0) + (-(h - tile) % max(int(tile * (1 - overlap)), 1)
-                                if h > tile else 0)
-    pad_w = max(tile - w, 0) + (-(w - tile) % max(int(tile * (1 - overlap)), 1)
-                                if w > tile else 0)
-    t = torch.from_numpy(x).unsqueeze(0)
+    _, h, w = z.shape
+    step = max(int(tile * (1 - overlap)) // stride * stride, stride)
+    pad_h, pad_w = _pad_to(h, tile, step), _pad_to(w, tile, step)
+
+    # Reflect-pad so windows tile exactly and edges keep real context. NaN
+    # nodata reflects harmlessly -- the model's centring step drops it anyway.
+    t = torch.from_numpy(z).unsqueeze(0)
+    cn = torch.from_numpy(canopy).unsqueeze(0) if v.canopy else None
     if pad_h or pad_w:
         t = F.pad(t, (0, pad_w, 0, pad_h), mode="reflect")
+        if cn is not None:
+            cn = F.pad(cn, (0, pad_w, 0, pad_h), mode="reflect")
     t = t.to(device)
+    cn = cn.to(device) if cn is not None else None
     _, _, H, W = t.shape
 
-    step = max(int(tile * (1 - overlap)), 1)
-    taper = hann2d(tile, device)
-    acc = torch.zeros((1, 1, H, W), device=device)
-    den = torch.zeros((1, 1, H, W), device=device)
+    bt = tile // stride
+    taper = hann2d(bt, device)
+    acc = torch.zeros((1, 1, H // stride, W // stride), device=device)
+    den = torch.zeros_like(acc)
 
-    origins = [(r, c)
-               for r in range(0, H - tile + 1, step)
+    origins = [(r, c) for r in range(0, H - tile + 1, step)
                for c in range(0, W - tile + 1, step)]
-
-    variants = [(k, f) for f in (False, True) for k in range(4)] if tta else [(0, False)]
+    d4 = [(k, f) for f in (False, True) for k in range(4)] if tta else [(0, False)]
 
     for i in range(0, len(origins), batch):
         chunk = origins[i:i + batch]
         crops = torch.cat([t[:, :, r:r + tile, c:c + tile] for r, c in chunk])
-        prob = torch.zeros((len(chunk), 1, tile, tile), device=device)
-        for k, flip in variants:
-            out = model(_d4(crops, k, flip))
+        ccrops = (torch.cat([cn[:, :, r:r + tile, c:c + tile] for r, c in chunk])
+                  if cn is not None else None)
+        prob = torch.zeros((len(chunk), 1, bt, bt), device=device)
+        for k, flip in d4:
+            cc = _d4(ccrops, k, flip) if ccrops is not None else None
+            out = model(_d4(crops, k, flip), cc, variant=v.key)
             prob += torch.sigmoid(_d4_inv(out, k, flip))
-        prob /= len(variants)
+        prob /= len(d4)
         for j, (r, c) in enumerate(chunk):
-            acc[0, :, r:r + tile, c:c + tile] += prob[j] * taper
-            den[0, :, r:r + tile, c:c + tile] += taper
+            br, bc = r // stride, c // stride
+            acc[0, :, br:br + bt, bc:bc + bt] += prob[j] * taper
+            den[0, :, br:br + bt, bc:bc + bt] += taper
 
-    out = (acc / den.clamp_min(1e-6))[0, :, :h, :w]
+    out = (acc / den.clamp_min(1e-6))[0, :, :h // stride, :w // stride]
     return out.cpu().numpy()

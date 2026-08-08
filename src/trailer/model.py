@@ -202,7 +202,7 @@ class Deployable(nn.Module):
         return torch.sigmoid(self.body(self.stem(z)))
 
 
-def export_onnx(net: MultiStemNet, variant: str, path, size: int = 384) -> dict:
+def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256) -> dict:
     """Freeze one variant to ONNX. Canopy variants are not deployable this way.
 
     The window is fixed rather than dynamic. That is a real constraint of the

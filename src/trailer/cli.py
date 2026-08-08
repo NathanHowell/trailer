@@ -211,13 +211,32 @@ def cmd_train(args) -> int:
         return 1
     test_dirs = _built(root, "eval", "control")
     args.res = _tile_res(train_dirs, args.res)
-    logging.info("train on %d tiles, hold out %d, %.2f m pixels",
+    logging.info("train on %d tiles, hold out %d, %.2f m source pixels",
                  len(train_dirs), len(test_dirs), args.res)
     report = train_mod.run(train_dirs, test_dirs, args)
-    print(f"\nbest relaxed F1 (val) {report['best_val_f1']:.4f}")
-    for name, rec in report["held_out"].items():
-        print(f"  {name:22s} f1@0.5 {rec['f1@0.5']:.3f}  "
-              f"recall {rec['r@0.5']:.3f}  fp {rec['fp_rate@0.5']:.5f}")
+    print(f"\nbest mean relaxed F1 (val) {report['best_val_f1']:.4f}")
+    for variant, tiles in report["held_out"].items():
+        print(f"  {variant}")
+        for name, rec in tiles.items():
+            print(f"    {name:22s} f1@0.5 {rec['f1@0.5']:.3f}  "
+                  f"recall {rec['r@0.5']:.3f}  fp {rec['fp_rate@0.5']:.5f}")
+    return 0
+
+
+def cmd_export(args) -> int:
+    import json as _json
+    from . import model as model_mod
+
+    net, meta = model_mod.load(args.checkpoint)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    info = model_mod.export_onnx(net, args.variant, out, size=args.window)
+    info |= {"checkpoint": str(args.checkpoint), "trained_variants": meta["variants"]}
+    (out.with_suffix(".json")).write_text(_json.dumps(info, indent=1))
+    size_mb = out.stat().st_size / 1e6
+    print(f"wrote {out} ({size_mb:.1f} MB)")
+    for k, v in info.items():
+        print(f"  {k}: {v}")
     return 0
 
 
@@ -226,20 +245,29 @@ def cmd_predict(args) -> int:
     from . import infer
     from . import model as model_mod
 
+    from . import variants as var_mod
+    from .data import full_tile
+
     root = Path(args.root)
     net, meta = model_mod.load(args.checkpoint, model_mod.pick_device(args.device))
+    variant = var_mod.get(args.variant or meta["variants"][0])
     for aoi in select(args.aoi, args.role):
         d = root / aoi.slug
-        if not (d / "features.tif").exists():
+        if not (d / "dtm_clean.tif").exists():
             logging.warning("%s not built, skipping", aoi.key)
             continue
-        with rasterio.open(d / "features.tif") as s:
-            x = s.read().astype("float32")
+        z, canopy, _, _ = full_tile(d, variant)
+        with rasterio.open(d / "dtm_clean.tif") as s:
             profile = s.profile
-        prob = infer.predict(net, x, tile=meta.get("crop", 384),
+        prob = infer.predict(net, z, canopy, variant=variant.key,
+                             body_tile=meta.get("crop", 256),
                              device=next(net.parameters()).device,
                              batch=args.batch, tta=args.tta)
-        profile.update(count=1, dtype="float32", compress="deflate", predictor=2)
+        # Predictions land on the body grid, so the transform coarsens with them.
+        k = var_mod.BODY_RES / _tile_res([d], 0.5)
+        profile.update(count=1, dtype="float32", compress="deflate",
+                       predictor=2, height=prob.shape[-2], width=prob.shape[-1],
+                       transform=profile["transform"] * rasterio.Affine.scale(k, k))
         out = d / "proposal.tif"
         with rasterio.open(out, "w", **profile) as dst:
             dst.write(prob.astype("float32"))
@@ -314,8 +342,12 @@ def main(argv=None) -> int:
                    choices=["unet", "unetpp", "deeplabv3p"])
     t.add_argument("--encoder", default="resnet34")
     t.add_argument("--no-pretrained", action="store_true")
-    t.add_argument("--crop", type=int, default=384,
-                   help="crop size in pixels (384 @ 0.5 m = 192 m of context)")
+    t.add_argument("--crop", type=int, default=256,
+                   help="crop size in body pixels (256 @ 1 m = 256 m of "
+                        "context); a 0.5 m variant reads twice this many")
+    t.add_argument("--variants", default=None,
+                   help="comma-separated input variants to train jointly "
+                        "(default lidar05,dem1)")
     t.add_argument("--batch", type=int, default=8)
     t.add_argument("--epochs", type=int, default=40)
     t.add_argument("--samples", type=int, default=2000,
@@ -327,11 +359,13 @@ def main(argv=None) -> int:
                    help="clDice loss weight (0 disables the topology term)")
     t.add_argument("--cldice-warmup", type=int, default=3,
                    help="epochs before clDice is ramped in")
-    t.add_argument("--noise", type=float, default=0.06,
-                   help="max sigma of injected band noise; sampled per crop to "
-                        "sweep the tread-to-roughness ratio (0 disables)")
-    t.add_argument("--band-dropout", type=float, default=0.15,
-                   help="probability of withholding the chm/vdi canopy bands")
+    t.add_argument("--noise-m", type=float, default=0.05,
+                   help="max sigma of injected elevation noise in METRES; "
+                        "sampled per crop to sweep the tread-to-roughness "
+                        "ratio (0 disables)")
+    t.add_argument("--canopy-dropout", type=float, default=0.15,
+                   help="probability of withholding the chm/vdi canopy bands "
+                        "from a canopy-bearing variant")
     t.add_argument("--workers", type=int, default=4)
     t.add_argument("--device", default=None, help="cuda / mps / cpu")
     t.add_argument("--tta", action="store_true",
@@ -343,10 +377,23 @@ def main(argv=None) -> int:
     pr = sub.add_parser("predict", parents=[common],
                         help="write a probability raster per tile")
     pr.add_argument("--checkpoint", default="runs/latest/best.pt")
+    pr.add_argument("--variant", default=None,
+                    help="input variant to run (default: the checkpoint's first)")
     pr.add_argument("--batch", type=int, default=8)
     pr.add_argument("--device", default=None)
     pr.add_argument("--tta", action="store_true")
     pr.set_defaults(fn=cmd_predict)
+
+    ex = sub.add_parser("export", parents=[common],
+                        help="freeze one variant to ONNX for the JOSM plugin")
+    ex.add_argument("--checkpoint", default="runs/latest/best.pt")
+    ex.add_argument("--variant", default="dem1",
+                    help="must be a bare-earth variant; no elevation service "
+                         "provides canopy")
+    ex.add_argument("--out", default="runs/latest/trailer.onnx")
+    ex.add_argument("--window", type=int, default=256,
+                    help="fixed body window in pixels; must be divisible by 32")
+    ex.set_defaults(fn=cmd_export)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
