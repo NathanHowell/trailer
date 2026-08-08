@@ -83,7 +83,15 @@ def fetch(south: float, west: float, north: float, east: float,
     if cache_path and cache_path.exists() and not refresh:
         return json.loads(cache_path.read_text())
 
-    query = build_query(south, west, north, east)
+    data = _request(build_query(south, west, north, east), attempts)
+    if cache_path:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(data))
+    return data
+
+
+def _request(query: str, attempts: int = 4) -> dict:
+    """POST a query, rotating mirrors and backing off."""
     # Keep one error per endpoint. Reporting only the last one hides which
     # mirror actually broke, and they fail for different reasons.
     errors: dict[str, str] = {}
@@ -98,11 +106,7 @@ def fetch(south: float, west: float, north: float, east: float,
                 continue
             # Overpass signals load-shedding with an HTML error page, not a 5xx.
             if r.status_code == 200 and r.text.lstrip().startswith("{"):
-                data = r.json()
-                if cache_path:
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cache_path.write_text(r.text)
-                return data
+                return r.json()
             snippet = r.text[:160].replace("\n", " ")
             errors[host] = f"HTTP {r.status_code}: {snippet}"
         if attempt < attempts - 1:

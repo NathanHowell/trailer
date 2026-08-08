@@ -77,39 +77,96 @@ def extract_points(ept_url: str, lat: float, lon: float, size_m: int,
 
 
 def _gdal_stage(dst: Path, res: float, output_type: str, dimension: str,
-                window: int, power: float = 1.0) -> dict:
-    return {"type": "writers.gdal", "filename": str(dst), "resolution": res,
-            "output_type": output_type, "power": power, "window_size": window,
-            "data_type": "float32", "nodata": NODATA, "dimension": dimension}
+                window: int, power: float = 1.0,
+                bounds: str | None = None) -> dict:
+    stage = {"type": "writers.gdal", "filename": str(dst), "resolution": res,
+             "output_type": output_type, "power": power, "window_size": window,
+             "data_type": "float32", "nodata": NODATA, "dimension": dimension}
+    if bounds:
+        stage["bounds"] = bounds
+    return stage
 
 
-def build_dtm(laz: Path, dst: Path, res: float) -> None:
+def grid_bounds(laz: Path, res: float) -> str:
+    """A single res-aligned extent shared by every raster in the stack.
+
+    Left to itself writers.gdal derives each raster's origin from whatever
+    points reach it, and the stages do not all see the same points -- the DTM
+    gets class 2 after outlier removal, the canopy rasters get everything. The
+    grids then differ by a fraction of a pixel and the band stack silently
+    misregisters, since build_feature_stack aligns bands by array index.
+    """
+    import laspy
+
+    with laspy.open(str(laz)) as fh:
+        h = fh.header
+    x0 = math.floor(h.mins[0] / res) * res
+    y0 = math.floor(h.mins[1] / res) * res
+    x1 = math.ceil(h.maxs[0] / res) * res
+    y1 = math.ceil(h.maxs[1] / res) * res
+    return f"([{x0:.3f},{x1:.3f}],[{y0:.3f},{y1:.3f}])"
+
+
+def build_dtm(laz: Path, dst: Path, res: float, bounds: str | None = None) -> None:
     run_pdal([
-        {"type": "readers.las", "filename": str(laz)},
+        _read_hag(laz),
         {"type": "filters.expression", "expression": "Classification == 2"},
         {"type": "filters.outlier", "method": "statistical",
          "mean_k": 8, "multiplier": 3.0},
         {"type": "filters.expression", "expression": "Classification == 2"},
-        _gdal_stage(dst, res, "idw", "Z", window=12, power=6.0),
+        _gdal_stage(dst, res, "idw", "Z", window=12, power=6.0, bounds=bounds),
     ], dst.parent, dst.stem)
 
 
-def build_chm(laz: Path, dst: Path, res: float) -> None:
+#: Height-above-ground is written into the point cloud once and reused. The
+#: nearest-ground-neighbour search costs ~28 s on a 1 km tile and all three
+#: vegetation rasters need it; running it per raster paid for it three times.
+#: PDAL cannot fan one pipeline out to several writers -- it silently runs only
+#: the first leaf -- so an annotated intermediate is the way to share the work.
+HAG_DIM = "HeightAboveGround=float32"
+
+
+def annotate_hag(laz: Path, dst: Path) -> None:
+    """Write the cloud back with HeightAboveGround attached.
+
+    Scale and offset are pinned to the source grid. Left to its own defaults
+    writers.las picks an offset from the data and re-quantises X/Y, which nudges
+    points sitting within a few millimetres of a raster cell boundary into the
+    neighbouring cell. That is invisible in the mean but changes per-cell max
+    and count statistics -- measured against the old path it moved 47% of CHM
+    pixels, mostly by ~0.3 m but occasionally by the full clip range.
+    """
     run_pdal([
         {"type": "readers.las", "filename": str(laz)},
         {"type": "filters.expression", "expression": NOISE_CLASSES},
         {"type": "filters.hag_nn"},
-        _gdal_stage(dst, res, "max", "HeightAboveGround", window=3),
+        {"type": "writers.las", "filename": str(dst),
+         "compression": "laszip", "extra_dims": HAG_DIM,
+         "offset_x": 0.0, "offset_y": 0.0, "offset_z": 0.0,
+         "scale_x": 0.01, "scale_y": 0.01, "scale_z": 0.01},
     ], dst.parent, dst.stem)
 
 
-def build_veg_count(laz: Path, dst: Path, res: float, expr: str) -> None:
+def _read_hag(laz: Path) -> dict:
+    return {"type": "readers.las", "filename": str(laz), "extra_dims": HAG_DIM}
+
+
+def build_chm(hag_laz: Path, dst: Path, res: float,
+              bounds: str | None = None) -> None:
     run_pdal([
-        {"type": "readers.las", "filename": str(laz)},
-        {"type": "filters.expression", "expression": NOISE_CLASSES},
-        {"type": "filters.hag_nn"},
+        _read_hag(hag_laz),
+        _gdal_stage(dst, res, "max", "HeightAboveGround", window=3,
+                    bounds=bounds),
+    ], dst.parent, dst.stem)
+
+
+def build_veg_count(hag_laz: Path, dst: Path, res: float, expr: str,
+                    bounds: str | None = None) -> None:
+    run_pdal([
+        _read_hag(hag_laz),
         {"type": "filters.expression", "expression": expr},
-        _gdal_stage(dst, res, "count", "HeightAboveGround", window=5),
+        _gdal_stage(dst, res, "count", "HeightAboveGround", window=5,
+                    bounds=bounds),
     ], dst.parent, dst.stem)
 
 
@@ -156,16 +213,34 @@ def derive_features(dtm: np.ndarray, chm: np.ndarray, low: np.ndarray,
     ]).astype("float32")
 
 
-def build_feature_stack(laz: Path, out_tif: Path, res: float) -> dict:
-    """Full raster build for one AOI. Returns a small QA summary."""
+def build_feature_stack(laz: Path, out_tif: Path, res: float,
+                        evict_points: bool = False) -> dict:
+    """Full raster build for one AOI. Returns a small QA summary.
+
+    Disk is the limiting resource when building tiles in bulk: a 1 km tile at
+    3DEP density is ~260 MB of points and ~120 MB of intermediate rasters
+    against ~78 MB actually worth keeping. Everything transient is therefore
+    deleted as soon as it has been consumed, and with ``evict_points`` the
+    source cloud goes too -- the annotated copy carries every dimension the
+    remaining stages need, including Classification for the DTM.
+    """
     work = out_tif.parent
     dtm_p, chm_p = work / "dtm.tif", work / "chm.tif"
     low_p, high_p = work / "lowveg.tif", work / "highveg.tif"
+    hag_p = work / "hag.laz"
 
-    build_dtm(laz, dtm_p, res)
-    build_chm(laz, chm_p, res)
-    build_veg_count(laz, low_p, res, "HeightAboveGround < 0.8")
-    build_veg_count(laz, high_p, res, "HeightAboveGround <= 12")
+    annotate_hag(laz, hag_p)
+    if evict_points:
+        # Peak footprint is the two clouds side by side; drop the source the
+        # moment the annotated one is complete rather than at the end.
+        laz.unlink(missing_ok=True)
+
+    grid = grid_bounds(hag_p, res)
+    build_dtm(hag_p, dtm_p, res, grid)
+    build_chm(hag_p, chm_p, res, grid)
+    build_veg_count(hag_p, low_p, res, "HeightAboveGround < 0.8", grid)
+    build_veg_count(hag_p, high_p, res, "HeightAboveGround <= 12", grid)
+    hag_p.unlink(missing_ok=True)
 
     with rasterio.open(dtm_p) as s:
         dtm_raw = s.read(1)
@@ -199,6 +274,13 @@ def build_feature_stack(laz: Path, out_tif: Path, res: float) -> dict:
                        crs=crs, transform=transform, nodata=NODATA,
                        compress="deflate") as d:
         d.write(np.where(valid, dtm, NODATA).astype("float32"), 1)
+
+    # Pure intermediates: everything downstream reads features.tif or
+    # dtm_clean.tif, and these four are ~120 MB per tile.
+    for p in (dtm_p, chm_p, low_p, high_p):
+        p.unlink(missing_ok=True)
+    for p in work.glob("_pipe_*.json"):
+        p.unlink(missing_ok=True)
 
     return {
         "shape": [rows, cols],

@@ -64,9 +64,15 @@ def point_stats(laz_path: Path, size_m: int) -> dict:
     }
 
 
-def build_aoi(aoi: Aoi, root: Path, res: float = 0.5,
-              force: bool = False, cache: Path | None = None) -> dict:
-    """Build one AOI. Idempotent unless force=True."""
+def build_aoi(aoi: Aoi, root: Path, res: float = 0.5, force: bool = False,
+              cache: Path | None = None, evict_points: bool = False) -> dict:
+    """Build one AOI. Idempotent unless force=True.
+
+    With ``evict_points`` the point cloud is deleted once the feature stack
+    exists, taking a tile from ~420 MB to ~78 MB. Rebuilding then means
+    re-downloading, which is the right trade for bulk harvest runs and the
+    wrong one for a tile being iterated on.
+    """
     out = root / aoi.slug
     out.mkdir(parents=True, exist_ok=True)
     manifest_path = out / MANIFEST
@@ -93,22 +99,27 @@ def build_aoi(aoi: Aoi, root: Path, res: float = 0.5,
                          cache_path=out / "osm.json", refresh=force)["elements"]
     log.info("%-22s %d OSM ways", aoi.key, len(elements))
 
-    laz = out / "points.laz"
-    if not laz.exists() or force:
-        rasters.extract_points(coverage.ept_url(project), aoi.lat,
-                               aoi.lon, aoi.size_m, laz)
-    rec["points"] = point_stats(laz, aoi.size_m)
-    log.info("%-22s %s pts, ground %.1f/m2", aoi.key,
-             f"{rec['points']['points']:,}", rec["points"]["ground_density"])
-
     feats = out / "features.tif"
     raster_meta = out / "raster.json"
+    laz = out / "points.laz"
+
     if feats.exists() and raster_meta.exists() and not force:
         rec["raster"] = json.loads(raster_meta.read_text())
+        rec["points"] = json.loads((out / "points.json").read_text()) \
+            if (out / "points.json").exists() else None
         log.info("%-22s reusing feature stack", aoi.key)
     else:
-        rec["raster"] = rasters.build_feature_stack(laz, feats, res)
+        if not laz.exists() or force:
+            rasters.extract_points(coverage.ept_url(project), aoi.lat,
+                                   aoi.lon, aoi.size_m, laz)
+        rec["points"] = point_stats(laz, aoi.size_m)
+        (out / "points.json").write_text(json.dumps(rec["points"], indent=1))
+        log.info("%-22s %s pts, ground %.1f/m2", aoi.key,
+                 f"{rec['points']['points']:,}", rec["points"]["ground_density"])
+        rec["raster"] = rasters.build_feature_stack(
+            laz, feats, res, evict_points=evict_points)
         raster_meta.write_text(json.dumps(rec["raster"], indent=1))
+    rec["points_evicted"] = not laz.exists()
 
     rec["labels"] = labels.build(elements, feats, out / "labels.tif", epsg)
 
@@ -125,11 +136,26 @@ def build_aoi(aoi: Aoi, root: Path, res: float = 0.5,
     return rec
 
 
-def build_all(aois, root: Path, res: float = 0.5, force: bool = False) -> list[dict]:
+def free_gb(path: Path) -> float:
+    import shutil
+    return shutil.disk_usage(path).free / 1e9
+
+
+def build_all(aois, root: Path, res: float = 0.5, force: bool = False,
+              evict_points: bool = False, min_free_gb: float = 5.0) -> list[dict]:
     out = []
-    for aoi in aois:
+    root.mkdir(parents=True, exist_ok=True)
+    for i, aoi in enumerate(aois, 1):
+        # A bulk run that fills the disk corrupts whatever it was mid-write, so
+        # stop while there is still room rather than discover it at the end.
+        free = free_gb(root)
+        if free < min_free_gb:
+            log.error("stopping at %d/%d: only %.1f GB free (need %.1f). "
+                      "Built tiles are intact.", i, len(aois), free, min_free_gb)
+            break
         try:
-            out.append(build_aoi(aoi, root, res=res, force=force))
+            out.append(build_aoi(aoi, root, res=res, force=force,
+                                 evict_points=evict_points))
         except Exception as exc:  # keep going; one bad tile shouldn't stop a run
             log.error("%-22s FAILED: %s", aoi.key, exc)
             out.append({"aoi": {"key": aoi.key}, "error": str(exc)})

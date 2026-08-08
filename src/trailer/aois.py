@@ -7,12 +7,15 @@ accumulate area.
 
 Roles:
     train    -- goes into the training split
+    harvest  -- auto-selected by `trailer harvest`; also trains
     eval     -- held out; scored but never trained on
     control  -- no mapped trails, used to measure the false-positive rate
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -99,19 +102,42 @@ AOIS: tuple[Aoi, ...] = (
               "can be measured honestly."),
 )
 
+#: Auto-selected tiles written by `trailer harvest`. Kept in a generated file
+#: rather than appended here: this module is hand-annotated with what each tile
+#: is *for*, and hundreds of machine-picked entries would drown that.
+HARVEST_REGISTRY = Path("data/harvest.json")
+
+
+def load_harvest(path: Path | None = None) -> tuple[Aoi, ...]:
+    path = path or HARVEST_REGISTRY
+    if not path.exists():
+        return ()
+    return tuple(
+        Aoi(**(rec | {"flags": frozenset(rec.get("flags", ()))}))
+        for rec in json.loads(path.read_text())
+    )
+
+
+def all_aois(harvest: bool = True) -> tuple[Aoi, ...]:
+    return AOIS + (load_harvest() if harvest else ())
+
+
 BY_KEY: dict[str, Aoi] = {a.key: a for a in AOIS}
 
 
-def select(keys: str | None = None, role: str | None = None) -> list[Aoi]:
+def select(keys: str | None = None, role: str | None = None,
+           harvest: bool = True) -> list[Aoi]:
     """Resolve a comma-separated key list and/or a role filter to AOIs."""
-    out = list(AOIS)
+    registry = all_aois(harvest)
+    by_key = {a.key: a for a in registry}
+    out = list(registry)
     if keys and keys != "all":
         wanted = [k.strip() for k in keys.split(",")]
-        missing = [k for k in wanted if k not in BY_KEY]
+        missing = [k for k in wanted if k not in by_key]
         if missing:
             raise KeyError(f"unknown AOI(s): {', '.join(missing)}. "
-                           f"known: {', '.join(BY_KEY)}")
-        out = [BY_KEY[k] for k in wanted]
+                           f"known: {', '.join(by_key)}")
+        out = [by_key[k] for k in wanted]
     if role:
         out = [a for a in out if a.role == role]
     return out

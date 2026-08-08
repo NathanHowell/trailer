@@ -46,11 +46,48 @@ def cmd_survey(args) -> int:
     return 0
 
 
+def cmd_harvest(args) -> int:
+    from . import harvest as harvest_mod
+
+    root = Path(args.root)
+    cache = root / ".cache"
+    bbox = tuple(float(v) for v in args.bbox.split(",")) if args.bbox \
+        else harvest_mod.SIERRA_BBOX
+    elements = harvest_mod.fetch(bbox, cache_dir=cache, refresh=args.refresh)
+    logging.info("%d faint/lifecycle ways in bbox", len(elements))
+
+    cells = harvest_mod.score_cells(elements, size_m=args.size)
+    if not cells:
+        print("no candidate cells found", file=sys.stderr)
+        return 1
+    total_km = sum(c["total_m"] for c in cells) / 1000
+    print(f"{len(cells)} candidate cells, {total_km:.0f} km of faint/lifecycle "
+          f"way outside the curated tiles")
+
+    chosen = harvest_mod.select_cells(cells, args.limit, cache, args.min_m)
+    if not chosen:
+        print("no covered cells above the threshold", file=sys.stderr)
+        return 1
+
+    path = harvest_mod.write_registry(chosen, Path(args.registry))
+    picked = sum(c["total_m"] for c in cells[:len(chosen)]) / 1000
+    print(f"wrote {len(chosen)} AOIs to {path} (~{picked:.1f} km of "
+          f"faint/lifecycle way)")
+    print(f"disk: {0.078 * len(chosen):.1f} GB evicting point clouds, "
+          f"{0.42 * len(chosen):.1f} GB keeping them; "
+          f"{build_mod.free_gb(root):.1f} GB free now")
+    print("\nnext:  uv run trailer build --role harvest --evict-points")
+    return 0
+
+
 def cmd_build(args) -> int:
     root = Path(args.root)
     aois = select(args.aoi, args.role)
-    logging.info("building %d AOI(s) at %.2f m into %s", len(aois), args.res, root)
-    results = build_mod.build_all(aois, root, res=args.res, force=args.force)
+    logging.info("building %d AOI(s) at %.2f m into %s (%.1f GB free)",
+                 len(aois), args.res, root, build_mod.free_gb(Path(".")))
+    results = build_mod.build_all(aois, root, res=args.res, force=args.force,
+                                  evict_points=args.evict_points,
+                                  min_free_gb=args.min_free_gb)
     failed = [r for r in results if "error" in r]
     ok = [r for r in results if "error" not in r]
     if ok:
@@ -95,8 +132,8 @@ def cmd_preview(args) -> int:
     return 0
 
 
-def _built(root: Path, role: str | None) -> list[Path]:
-    dirs = [root / a.slug for a in select("all", role)]
+def _built(root: Path, *roles: str) -> list[Path]:
+    dirs = [root / a.slug for r in roles for a in select("all", r)]
     return [d for d in dirs if (d / "manifest.json").exists()]
 
 
@@ -114,11 +151,11 @@ def cmd_train(args) -> int:
     from . import train as train_mod
 
     root = Path(args.root)
-    train_dirs = _built(root, "train")
+    train_dirs = _built(root, "train", "harvest")
     if not train_dirs:
         print("no built training tiles -- run `trailer build` first", file=sys.stderr)
         return 1
-    test_dirs = _built(root, "eval") + _built(root, "control")
+    test_dirs = _built(root, "eval", "control")
     args.res = _tile_res(train_dirs, args.res)
     logging.info("train on %d tiles, hold out %d, %.2f m pixels",
                  len(train_dirs), len(test_dirs), args.res)
@@ -166,7 +203,7 @@ def main(argv=None) -> int:
     common.add_argument("--aoi", default="all",
                         help="comma-separated AOI keys, or 'all'")
     common.add_argument("--role", default=None,
-                        choices=["train", "eval", "control"])
+                        choices=["train", "harvest", "eval", "control"])
     common.add_argument("-v", "--verbose", action="store_true")
 
     p = argparse.ArgumentParser(prog="trailer", parents=[common],
@@ -182,7 +219,25 @@ def main(argv=None) -> int:
                    help="pixel size in metres (default 0.5; 0.25 is supported "
                         "by ground density but ~4x slower)")
     b.add_argument("--force", action="store_true", help="rebuild cached tiles")
+    b.add_argument("--evict-points", action="store_true",
+                   help="delete points.laz once features are built "
+                        "(~420 MB -> ~78 MB per tile; rebuild needs re-download)")
+    b.add_argument("--min-free-gb", type=float, default=5.0,
+                   help="stop the run when free disk drops below this")
     b.set_defaults(fn=cmd_build)
+
+    h = sub.add_parser("harvest", parents=[common],
+                       help="auto-select tiles by faint/abandoned trail density")
+    h.add_argument("--limit", type=int, default=60,
+                   help="maximum tiles to select")
+    h.add_argument("--min-m", type=float, default=400.0,
+                   help="minimum metres of faint/lifecycle way per tile")
+    h.add_argument("--size", type=int, default=1000, help="grid cell size in m")
+    h.add_argument("--bbox", default=None,
+                   help="south,west,north,east (default: High Sierra)")
+    h.add_argument("--registry", default="data/harvest.json")
+    h.add_argument("--refresh", action="store_true", help="re-query Overpass")
+    h.set_defaults(fn=cmd_harvest)
 
     sub.add_parser("qa", parents=[common],
                    help="measure tread signal per tile").set_defaults(fn=cmd_qa)
