@@ -223,6 +223,47 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_relabel(args) -> int:
+    """Rebuild labels.tif from cached OSM without touching point clouds."""
+    from . import labels as labels_mod
+    from . import rasters
+
+    root = Path(args.root)
+    done = skipped = 0
+    totals = {"active": 0.0, "faint": 0.0, "lifecycle": 0.0}
+    for aoi in select(args.aoi, args.role):
+        d = root / aoi.slug
+        # A manifest means the tile finished. Relabelling one still being built
+        # would race the builder writing the same file.
+        if not ((d / "manifest.json").exists() and (d / "features.tif").exists()
+                and (d / "osm.json").exists()):
+            skipped += 1
+            continue
+        m = json.loads((d / "manifest.json").read_text())
+        if "error" in m:
+            skipped += 1
+            continue
+        epsg = m.get("epsg") or rasters.utm_epsg(aoi.lat, aoi.lon)
+        elements = json.loads((d / "osm.json").read_text())["elements"]
+        rec = labels_mod.build(elements, d / "features.tif",
+                               d / "labels.tif", epsg)
+        if "water" in aoi.flags and (d / "dtm_clean.tif").exists():
+            frac = labels_mod.mask_water_from_dtm(d / "dtm_clean.tif",
+                                                  d / "labels.tif")
+            rec["water_masked_frac"] = round(frac, 4)
+        m["labels"] = rec
+        (d / "manifest.json").write_text(json.dumps(m, indent=1))
+        for k, v in rec["trail_km_by_class"].items():
+            totals[k] += v
+        done += 1
+        logging.info("%-22s %s", aoi.key, rec["trail_km_by_class"])
+
+    print(f"relabelled {done}, skipped {skipped}")
+    print("  trail km by class: " +
+          "  ".join(f"{k} {v:.2f}" for k, v in totals.items()))
+    return 0
+
+
 def cmd_dem(args) -> int:
     from . import dem as dem_mod
 
@@ -451,6 +492,10 @@ def main(argv=None) -> int:
     dm.add_argument("--force", action="store_true",
                     help="refetch tiles that already have dem1m.tif")
     dm.set_defaults(fn=cmd_dem)
+
+    rl = sub.add_parser("relabel", parents=[common],
+                        help="rebuild labels.tif from cached OSM (no downloads)")
+    rl.set_defaults(fn=cmd_relabel)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

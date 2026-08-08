@@ -52,6 +52,25 @@ LIFECYCLE_PREFIXES = (
     "abandoned", "disused", "was", "razed", "demolished", "removed",
 )
 
+#: Visibility grades that make a way "faint". These are the ways the project
+#: exists to find, so pooling them with clear trails hides the only comparison
+#: that matters.
+FAINT_VISIBILITY = frozenset({"bad", "horrible", "no"})
+
+#: Ordered so a higher code wins where ways overlap: the rarer, harder class is
+#: the one we want a pixel attributed to.
+VISIBILITY_CLASSES = ("active", "faint", "lifecycle")
+CLASS_CODE = {c: i + 1 for i, c in enumerate(VISIBILITY_CLASSES)}
+
+
+def visibility_class(tags: dict[str, str]) -> str:
+    """Which kind of evidence a way represents: active, faint, or lifecycle."""
+    if any(f"{p}:highway" in tags for p in LIFECYCLE_PREFIXES):
+        return "lifecycle"
+    if tags.get("trail_visibility") in FAINT_VISIBILITY:
+        return "faint"
+    return "active"
+
 #: Loss weight by trail_visibility. Faint trails are real but the label is less
 #: certain and the terrain evidence is weaker, so they are down-weighted rather
 #: than dropped.

@@ -68,17 +68,11 @@ def profile_stats(profiles: np.ndarray, offsets: np.ndarray) -> dict:
 #: Visibility grades that make a way "faint" for reporting. These are the ways
 #: the project exists to find, so pooling them with clear trails -- as an
 #: active/lifecycle split alone does -- hides the only comparison that matters.
-FAINT_VISIBILITY = frozenset({"bad", "horrible", "no"})
+FAINT_VISIBILITY = osm.FAINT_VISIBILITY
 
-CLASSES = ("active", "faint", "lifecycle")
+CLASSES = osm.VISIBILITY_CLASSES
 
-
-def _bucket(tags: dict) -> str:
-    if any(f"{p}:highway" in tags for p in osm.LIFECYCLE_PREFIXES):
-        return "lifecycle"
-    if tags.get("trail_visibility") in FAINT_VISIBILITY:
-        return "faint"
-    return "active"
+_bucket = osm.visibility_class
 
 
 def analyse(aoi_dir: Path) -> dict:
