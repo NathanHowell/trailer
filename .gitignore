@@ -167,3 +167,9 @@ cython_debug/
 # Built tiles: point clouds and raster stacks, hundreds of MB per AOI.
 # Everything here is reproducible with `uv run trailer build`.
 data/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
