@@ -19,14 +19,19 @@ Two things this module refuses to do quietly:
   checked against the DTM we already hold, and the tile is rejected below
   ``MIN_SLOPE_CORR``. 13 of 64 tiles failed on the first run.
 
-  The gate is on agreement, not on a diagnosis. Two obvious culprits were
-  measured and RULED OUT: it is not a 1/3 arc-second fallback resampled up (the
-  structure function D(1)/D(8) matches our own grid on failing tiles, where a
-  10 m source would collapse it), and it is not misregistration (cross-
-  correlating over +/-12 px moves whitney_switchbacks only 0.28 -> 0.32). The
-  leading remaining hypothesis is genuine divergence where ground returns are
-  sparse -- steep rock and cliffs, where both products are mostly interpolating
-  and our IDW and USGS's method have nothing to agree about. Unconfirmed.
+  An earlier version of this gate rejected 13 of 64 tiles, and it was WRONG.
+  It filled nodata with a global median before differencing, which manufactures
+  a cliff at the edge of every hole; Pearson correlation over a handful of such
+  extremes read 0.25 on kearsarge_pass where the real agreement is 0.85, and
+  0.12 on rae_lakes (27% nodata) where it is 0.78. Failure tracked how much
+  nodata a tile had, not whether the DEM was any good. Nodata now propagates as
+  NaN so affected cells drop out, and slope is clipped at 60 degrees -- the same
+  bound preprocess applies before the model sees the band.
+
+  Two other culprits were measured and ruled out while chasing that: it is not a
+  1/3 arc-second fallback resampled up (the structure function D(1)/D(8) matches
+  our own grid), and it is not misregistration (cross-correlating over +/-12 px
+  moved whitney_switchbacks only 0.28 -> 0.32).
 
 * **Trust HTTP 200.** The ImageServer returns errors as JSON with a 200 status,
   so the response is checked for a TIFF magic number rather than a status code.
@@ -105,10 +110,24 @@ def fetch(bounds, epsg: int, width: int, height: int,
     raise RuntimeError(f"3DEP fetch failed after {attempts} attempts: {last}")
 
 
+#: Slope is compared clipped at 60 degrees, the same bound preprocess applies
+#: before the model ever sees the band.
+SLOPE_CLIP = float(np.tan(np.radians(60.0)))
+
+
 def _slope(z: np.ndarray, res: float) -> np.ndarray:
-    z = np.nan_to_num(z, nan=float(np.nanmedian(z)))
-    gy, gx = np.gradient(z.astype("float64"), res)
-    return np.hypot(gx, gy)
+    """Gradient magnitude, clipped, with nodata neighbourhoods invalidated.
+
+    Filling holes with a constant and differencing across the seam manufactures
+    cliffs: on rae_lakes, 27% nodata, that pushed our maximum gradient to 28.8
+    against USGS's 6.9, and a Pearson correlation over those few extremes read
+    0.115 where the real agreement is 0.84. Nodata is propagated as NaN instead,
+    so every cell that touched a hole drops out of the comparison rather than
+    inventing terrain.
+    """
+    z = z.astype("float64")
+    gy, gx = np.gradient(z, res)
+    return np.clip(np.hypot(gx, gy), 0.0, SLOPE_CLIP)
 
 
 def build_dem(d: Path, force: bool = False) -> dict | None:
@@ -145,8 +164,10 @@ def build_dem(d: Path, force: bool = False) -> dict | None:
     if m.sum() < 1000:
         return {"key": d.name, "error": "too little overlap to validate"}
 
-    so, su = _slope(ours, RES_M)[m], _slope(zc, RES_M)[m]
-    corr = float(np.corrcoef(so, su)[0, 1])
+    so, su = _slope(ours, RES_M), _slope(zc, RES_M)
+    # A gradient cell is only comparable if it and its neighbours were real.
+    m &= np.isfinite(so) & np.isfinite(su)
+    corr = float(np.corrcoef(so[m], su[m])[0, 1])
     offset = float(np.nanmedian(zc[m] - ours[m]))
 
     rec = {"key": d.name, "shape": [int(n0), int(n1)],
