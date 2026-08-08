@@ -3,6 +3,12 @@ name = "trailer"
 version = "0.1.0"
 description = "LiDAR trail detection for OpenStreetMap, targeting a JOSM plugin"
 readme = "README.md"
+# The code only. Trained weights are CC BY-SA 4.0 and are not shipped in this
+# distribution -- see LICENSE-MODEL. LICENSE-MODEL is deliberately not listed in
+# license-files, so a scanner reading the wheel does not conclude the code is
+# share-alike.
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "laspy[lazrs]>=2.5.4",

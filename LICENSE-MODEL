@@ -1,0 +1,79 @@
+Trained model weights — Creative Commons Attribution-ShareAlike 4.0
+==================================================================
+
+This file covers the trained weights distributed by this project: the `.onnx`
+files written by `trailer export`, the `.pt` checkpoints they come from, and
+the sidecar JSON that travels with them.
+
+It does NOT cover the source code. The code is MIT — see LICENSE. The two are
+deliberately different, for the reason set out below.
+
+    Model weights © 2026 Nathan Howell, licensed under CC BY-SA 4.0.
+    https://creativecommons.org/licenses/by-sa/4.0/
+
+The full legal text is not reproduced here on purpose. Creative Commons asks
+that its licences be applied by reference to the canonical text rather than
+copied, because a copy that drifts by a word is worse than a link.
+
+
+Attribution
+-----------
+
+Anyone redistributing the weights, or a work produced with them, must carry
+these notices. The JOSM plugin displays them in the layer's info panel, so a
+mapper using the overlay sees them without going looking.
+
+    Trail probability model © 2026 Nathan Howell, CC BY-SA 4.0.
+    Trained on trail geometry from OpenStreetMap © OpenStreetMap
+    contributors, available under the Open Database Licence (ODbL).
+    Elevation from the USGS 3D Elevation Program (3DEP), a work of the
+    United States government and in the public domain.
+
+
+Why the weights are not MIT
+---------------------------
+
+The model is trained on two sources with very different terms.
+
+USGS 3DEP is a work of the US federal government and carries no copyright
+(17 U.S.C. § 105). Citation is a courtesy the USGS asks for, not a condition,
+and it is given above.
+
+OpenStreetMap is under ODbL 1.0, which is share-alike, and that is the part
+that needs a stated position. OSM geometry is used here as *training labels*.
+It is not redistributed, and the model does not consult OSM at inference time:
+it reads bare-earth elevation and emits a probability raster.
+
+ODbL distinguishes a Derivative Database, which must itself be ODbL, from a
+Produced Work, which may be licensed freely provided it carries attribution.
+Which of the two a set of neural network weights is has not been settled — the
+OSM Foundation has issued no guideline that squarely answers it, and reasonable
+people in the community disagree.
+
+This project's position is that the weights are a Produced Work. The model
+cannot be queried for OSM features, reproduces no OSM geometry, and yields a
+raster rather than data. But that position is an argument, not a ruling, so the
+weights are released under a share-alike licence anyway. If the Produced Work
+reading is right, CC BY-SA gives away more freedom than required. If it is
+wrong, the share-alike obligation ODbL would have imposed has been honoured
+regardless. Being wrong in that direction costs this project nothing and costs
+the OSM community nothing, which is the only asymmetry that matters here.
+
+CC BY-SA rather than ODbL itself because ODbL is built around database rights
+and applies awkwardly to something that is not a database. CC BY-SA rather than
+plain CC BY — the choice TrailScan made for its weights — because ODbL is
+share-alike and dropping that on the way through is exactly the move the
+licence exists to prevent.
+
+
+What this means in practice
+---------------------------
+
+  * Use the weights, including commercially: yes.
+  * Fine-tune them, or distil them into another model: yes, and the result is
+    also CC BY-SA 4.0.
+  * Bundle them in a proprietary product: yes, but the weights stay CC BY-SA
+    and the attribution above must be shown.
+  * Trace the heatmap into OpenStreetMap: yes — that is what it is for. See
+    the mapper guidance in README.md, which is about OSM's expectations rather
+    than about copyright.

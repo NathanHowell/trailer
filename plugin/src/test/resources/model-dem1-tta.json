@@ -13,6 +13,8 @@
   "trail_probability",
   "window_taper"
  ],
+ "license": "CC-BY-SA-4.0",
+ "attribution": "Trail probability model (c) 2026 Nathan Howell, CC BY-SA 4.0. Trained on trail geometry from OpenStreetMap (c) OpenStreetMap contributors, available under the Open Database Licence (ODbL). Elevation from the USGS 3D Elevation Program (3DEP), a work of the United States government and in the public domain.",
  "input": "single-band float32 bare-earth elevation in metres, NaN for nodata",
  "output": "trail probability at 1 m",
  "taper": "window_taper is the blending weight for this window; accumulate probability*taper and taper, then divide",

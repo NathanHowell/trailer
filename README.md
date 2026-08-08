@@ -318,7 +318,16 @@ D4 test-time augmentation — nearly free accuracy at 8× the compute.
 ```
 input   elevation_m         (1, 1, N, N) float32, metres, NaN for nodata
 output  trail_probability   (1, 1, N, N) float32, at 1 m
+output  window_taper        (1, 1, N, N) float32, blending weight
 ```
+
+The taper is a graph output rather than something the plugin computes, and
+`--tta` bakes the D4 average into the graph rather than exposing a flag: both
+are cases of the same rule, that anything the plugin would otherwise
+reimplement lives behind the ONNX boundary. Numbers the plugin needs in order
+to tile — stride, step, pad mode — are in the sidecar JSON as numbers, read
+rather than re-derived. Prose in that sidecar is how the two once came to
+disagree about the window step.
 
 The window is fixed rather than dynamic. That is a real constraint of the
 architecture, not an export limitation — a ResNet-34 U-Net needs its input
@@ -330,6 +339,76 @@ stems' BatchNorm. The one op with no ONNX equivalent is the median filter;
 `im2col` + `TopK` reproduces `scipy.ndimage.median_filter` bit-for-bit at
 k = 3, 4, 10, 20, including the lower-median convention for even k. A round trip
 through onnxruntime on real elevation matches torch to 2.7e-6.
+
+## Licensing
+
+Two artefacts, two licences, on purpose.
+
+| | Licence | |
+|---|---|---|
+| Source code, JOSM plugin | **MIT** | `LICENSE` |
+| Trained weights (`.onnx`, `.pt`, sidecar) | **CC BY-SA 4.0** | `LICENSE-MODEL` |
+
+MIT is GPL-2.0-compatible, so a plugin combined with JOSM is fine: the combined
+work is GPL and the plugin's own terms stay MIT.
+
+The weights are share-alike because they are trained on two sources with very
+different terms. USGS 3DEP is a US government work and carries no copyright.
+OpenStreetMap is ODbL, which *is* share-alike, and OSM geometry is used here as
+training labels.
+
+Whether neural network weights are an ODbL "Derivative Database" — which must be
+ODbL — or a "Produced Work" — which may be licensed freely with attribution —
+is not settled, and the OSM Foundation has issued no guideline that squarely
+answers it. This project's position is Produced Work: the model reproduces no
+OSM geometry, cannot be queried for OSM features, does not consult OSM at
+inference time, and emits a raster rather than data. But that is an argument,
+not a ruling, so the weights are released share-alike regardless. If the
+Produced Work reading is right, CC BY-SA gives away more than required; if it is
+wrong, the obligation has been met anyway. Being wrong in that direction costs
+nothing, which is the only asymmetry that matters. Full reasoning, and why
+CC BY-SA rather than ODbL itself or plain CC BY, is in `LICENSE-MODEL`.
+
+Attribution travels in the export sidecar rather than living only here, because
+what a mapper downloads is the weights. `ModelSpec` **refuses to load a model
+whose sidecar has no attribution**, and refuses rather than substituting a
+built-in default — a fallback would let a stripped file paint anyway, which is
+the one thing the check exists to stop. The plugin shows the notice in the
+layer's info panel.
+
+## Using this in OSM
+
+Read this before tracing anything.
+
+**This is an assistive overlay, not a data source.** It colours where a trail
+probably is. It does not know whether that trail exists, whether it is public,
+whether it is a trail at all rather than an old skid road, a firebreak, a
+cattle path or a stream cut. You do.
+
+**It is not an import and must not be used as one.** There is no "convert to
+way" button and there will not be one. Every way is drawn by a person who
+looked at the evidence and judged it real. That is what keeps ML-assisted
+mapping welcome in OSM, and it is a product decision rather than an unfinished
+feature.
+
+**Verify against something else.** The model buys recall at the cost of
+precision — deliberately, because a faint candidate you reject costs a moment
+and one you never see costs the trail. A high-probability blob is a prompt to
+go and look at the hillshade, the imagery, your GPS traces or your memory of
+walking it. It is not evidence on its own.
+
+**Do not bulk-trace a sweep.** Lowering the threshold until the map lights up
+and tracing everything is exactly the behaviour that gets tools like this
+banned. If you cannot say why a specific line is a trail, do not draw it.
+
+**Tag honestly.** If you traced from this overlay, `source=…` should say so
+alongside the underlying elevation source, e.g.
+`source=USGS 3DEP LiDAR;trailer`. A reviewer who finds a mistake needs to know
+what to distrust.
+
+**Scope.** The model is trained on the western US mountain terrain listed below
+and validated there. Nothing establishes that it transfers to other landscapes,
+and its false-positive behaviour off that distribution is simply unmeasured.
 
 ## Areas
 

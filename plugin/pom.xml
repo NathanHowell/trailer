@@ -11,6 +11,22 @@
     <name>trailer</name>
     <description>Trail probability overlay for JOSM, from LiDAR bare-earth elevation</description>
 
+    <!--
+      MIT for the plugin code. That is GPL-2.0-compatible, so combining it with
+      JOSM is fine; the combined work is GPL and the plugin's own terms stay MIT.
+
+      The trained weights are a separate artefact under CC BY-SA 4.0 and are not
+      built into this jar - they are downloaded alongside it, carrying their own
+      licence and attribution in the export sidecar. See LICENSE-MODEL.
+    -->
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://spdx.org/licenses/MIT.html</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <kotlin.code.style>official</kotlin.code.style>

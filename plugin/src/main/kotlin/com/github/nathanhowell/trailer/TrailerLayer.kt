@@ -22,6 +22,7 @@ import javax.swing.JLabel
 import javax.swing.JOptionPane
 import javax.swing.JPanel
 import javax.swing.JSlider
+import javax.swing.JTextArea
 
 /**
  * The trail-probability overlay.
@@ -159,8 +160,29 @@ class TrailerLayer(private var overlay: Overlay) : Layer(NAME) {
                      "${"%.2f".format(overlay.pixelWidthM)} m"))
         p.add(JLabel("Threshold: ${"%.2f".format(threshold)}"))
         p.add(JLabel("This layer never creates ways. Trace what you judge to be real."))
+        p.add(attributionNotice(overlay.attribution))
         return p
     }
+
+    /**
+     * The weights' attribution, shown rather than filed away.
+     *
+     * A [JTextArea] rather than a [JLabel] because the notice names three
+     * parties and does not fit on one line, and a label would silently clip it
+     * — satisfying the licence only at window widths nobody guarantees. Not
+     * editable, not focusable, and transparent, so it reads as text and not as
+     * an input.
+     */
+    private fun attributionNotice(text: String): Component =
+        JTextArea(text).apply {
+            lineWrap = true
+            wrapStyleWord = true
+            isEditable = false
+            isFocusable = false
+            isOpaque = false
+            columns = 44
+            font = JLabel().font
+        }
 
     override fun getMenuEntries(): Array<Action> = arrayOf(
         LayerListDialog.getInstance().createShowHideLayerAction(),

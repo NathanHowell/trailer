@@ -18,6 +18,15 @@ class ModelSpecTest {
 
     private val dem1 = ModelSpec(fixture("model-dem1.json"))
 
+    /**
+     * The licence fields every real sidecar carries.
+     *
+     * Spelled once so the hand-written cases below each vary exactly one thing.
+     * They are required rather than defaulted, so omitting them here would make
+     * every case fail for the wrong reason.
+     */
+    private val LICENCE = """"license":"CC-BY-SA-4.0","attribution":"(c) test""""
+
     @Test
     fun `reads a real exported sidecar`() {
         assertEquals("dem1", dem1.variant)
@@ -53,7 +62,7 @@ class ModelSpecTest {
                 {"variant":"old","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
                  "step_px":128,"pad_mode":"reflect","tta":false,
-                 "outputs":["trail_probability"]}
+                 "outputs":["trail_probability"],$LICENCE}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("taper"), e.message!!)
@@ -70,7 +79,7 @@ class ModelSpecTest {
             {"variant":"future05","res_m":0.5,"out_res_m":1.0,
              "input_px":512,"output_px":256,"stride":2,"overlap":0.7,
              "step_px":152,"pad_mode":"reflect","tta":false,
-             "outputs":["trail_probability","window_taper"]}
+             "outputs":["trail_probability","window_taper"],$LICENCE}
         """.trimIndent())
         assertEquals(152, strideTwo.stepPx, "the number Python computed, unmodified")
         assertEquals(76, strideTwo.bodyStepPx, "step in output pixels")
@@ -91,7 +100,7 @@ class ModelSpecTest {
                 {"variant":"bad","res_m":0.5,"out_res_m":1.0,
                  "input_px":500,"output_px":256,"stride":2,"overlap":0.5,
                  "step_px":250,"pad_mode":"reflect","tta":false,
-                 "outputs":["trail_probability","window_taper"]}
+                 "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("input_px"), e.message!!)
@@ -107,7 +116,7 @@ class ModelSpecTest {
                 {"variant":"bad","res_m":0.5,"out_res_m":1.0,
                  "input_px":512,"output_px":256,"stride":2,"overlap":0.7,
                  "step_px":153,"pad_mode":"reflect","tta":false,
-                 "outputs":["trail_probability","window_taper"]}
+                 "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("multiple of stride"), e.message!!)
@@ -120,7 +129,7 @@ class ModelSpecTest {
                 {"variant":"bad","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
                  "step_px":128,"pad_mode":"replicate","tta":false,
-                 "outputs":["trail_probability","window_taper"]}
+                 "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("replicate"), e.message!!)
@@ -139,13 +148,42 @@ class ModelSpecTest {
     }
 
     @Test
+    fun `carries the weights' licence and attribution`() {
+        // The weights are CC BY-SA and the code is MIT; they are different
+        // artefacts with different terms, and the sidecar is what a downloaded
+        // .onnx has instead of a repository.
+        assertEquals("CC-BY-SA-4.0", dem1.license)
+        assertTrue(dem1.attribution.contains("OpenStreetMap"), dem1.attribution)
+        assertTrue(dem1.attribution.contains("3DEP"), dem1.attribution)
+        assertTrue(dem1.attribution.contains("CC BY-SA"), dem1.attribution)
+    }
+
+    @Test
+    fun `refuses a model that has lost its attribution`() {
+        // Not defaulted to a constant compiled in here. Displaying the notice is
+        // a condition of the licence, so a file that arrives without one is a
+        // file this plugin has no right to paint — and a built-in fallback would
+        // let exactly that file paint anyway.
+        val e = assertFailsWith<IllegalArgumentException> {
+            ModelSpec("""
+                {"variant":"bad","res_m":1.0,"out_res_m":1.0,
+                 "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
+                 "step_px":128,"pad_mode":"reflect","tta":false,
+                 "outputs":["trail_probability","window_taper"],
+                 "license":"CC-BY-SA-4.0","attribution":"  "}
+            """.trimIndent())
+        }
+        assertTrue(e.message!!.contains("attribution"), e.message!!)
+    }
+
+    @Test
     fun `rejects a step of zero, which would loop forever`() {
         assertFailsWith<IllegalArgumentException> {
             ModelSpec("""
                 {"variant":"bad","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":1.0,
                  "step_px":0,"pad_mode":"reflect","tta":false,
-                 "outputs":["trail_probability","window_taper"]}
+                 "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
     }

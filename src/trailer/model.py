@@ -31,6 +31,25 @@ log = logging.getLogger(__name__)
 
 DEFAULT_ENCODER = "resnet34"
 
+#: Licence of the *weights*, which is not the licence of this code. See
+#: LICENSE-MODEL for the reasoning: the code is MIT, but the weights are trained
+#: on ODbL trail geometry and are released share-alike whether or not ODbL
+#: strictly compels it.
+MODEL_LICENSE = "CC-BY-SA-4.0"
+
+#: Attribution the licence requires anyone showing the weights' output to
+#: display. It travels in the export sidecar rather than living only in a
+#: repository the mapper never sees, and ``ModelSpec`` refuses to load a model
+#: without it -- showing this is a condition of the licence, not a nicety, so a
+#: model file that has lost it is one the plugin has no right to paint.
+MODEL_ATTRIBUTION = (
+    "Trail probability model (c) 2026 Nathan Howell, CC BY-SA 4.0. "
+    "Trained on trail geometry from OpenStreetMap (c) OpenStreetMap "
+    "contributors, available under the Open Database Licence (ODbL). "
+    "Elevation from the USGS 3D Elevation Program (3DEP), a work of the "
+    "United States government and in the public domain."
+)
+
 #: Channels a stem hands the shared trunk. Wide enough that a stride-2 stem can
 #: encode what it saw at 0.5 m before decimating, which is the whole reason the
 #: sub-metre path exists.
@@ -290,6 +309,10 @@ def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256,
         # mapper downloads for an 8x-compute option most will leave alone.
         "tta": tta,
         "outputs": ["trail_probability", "window_taper"],
+        # Travels with the weights, because the weights travel without the
+        # repository. See LICENSE-MODEL.
+        "license": MODEL_LICENSE,
+        "attribution": MODEL_ATTRIBUTION,
         "input": "single-band float32 bare-earth elevation in metres, "
                  "NaN for nodata",
         "output": f"trail probability at {var_mod.BODY_RES:g} m",

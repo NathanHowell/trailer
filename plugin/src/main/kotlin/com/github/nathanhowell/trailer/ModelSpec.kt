@@ -75,7 +75,26 @@ class ModelSpec(json: String) {
     /** Output tensor names, in order. The taper is the second one. */
     val outputs: List<String> = required("outputs").map { it.asText() }
 
+    /** SPDX identifier for the weights, which are not under the plugin's licence. */
+    val license: String = required("license").asText()
+
+    /**
+     * The notice the licence requires to be shown wherever the output is.
+     *
+     * Required, not optional, and deliberately not defaulted to a constant
+     * compiled into the plugin. A model file that has lost its attribution is
+     * one this plugin has no right to paint, and inventing the notice here
+     * would let a stripped file paint anyway — which is the whole failure it
+     * is meant to prevent. It is carried in the sidecar rather than read from
+     * the repository because the weights are what gets downloaded.
+     */
+    val attribution: String = required("attribution").asText()
+
     init {
+        require(license.isNotBlank()) { "model sidecar has a blank licence" }
+        require(attribution.isNotBlank()) {
+            "model sidecar has a blank attribution; the licence requires one"
+        }
         require(inputPx == outputPx * stride) {
             "sidecar is inconsistent: input_px $inputPx is not output_px " +
                 "$outputPx x stride $stride"

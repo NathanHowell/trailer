@@ -25,9 +25,22 @@ class Overlay(
     val source: String,
     /** Which exported model produced this, so a result can be reproduced. */
     val model: String,
+    /**
+     * The weights' attribution notice, verbatim from the model sidecar.
+     *
+     * A constructor argument rather than something the layer looks up, so a
+     * painted overlay cannot exist without one. The weights are CC BY-SA and
+     * are trained on ODbL geometry; showing this is a licence condition, and a
+     * condition that is easy to satisfy only when you remember is one that will
+     * eventually not be satisfied.
+     */
+    val attribution: String,
 ) {
     init {
         require(width > 0 && height > 0) { "empty overlay: $width x $height" }
+        require(attribution.isNotBlank()) {
+            "an overlay must carry the model's attribution notice"
+        }
         require(prob.size == width * height) {
             "expected ${width * height} probabilities, got ${prob.size}"
         }

@@ -14,7 +14,8 @@ class OverlayTest {
     private fun overlay(prob: FloatArray = FloatArray(8)) = Overlay(
         prob, width = 4, height = 2,
         minEast = 1000.0, minNorth = 5000.0, maxEast = 1400.0, maxNorth = 5200.0,
-        projection = "EPSG:32611", source = "USGS 1 Meter", model = "test")
+        projection = "EPSG:32611", source = "USGS 1 Meter", model = "test",
+        attribution = "test attribution")
 
     private fun assertPoint(x: Double, y: Double, p: Point2D, msg: String) {
         assertEquals(x, p.x, 1e-6, "$msg x")
@@ -85,7 +86,7 @@ class OverlayTest {
     @Test
     fun `rejects a raster that does not match its declared size`() {
         assertFailsWith<IllegalArgumentException> {
-            Overlay(FloatArray(7), 4, 2, 0.0, 0.0, 1.0, 1.0, "EPSG:4326", "s", "m")
+            Overlay(FloatArray(7), 4, 2, 0.0, 0.0, 1.0, 1.0, "EPSG:4326", "s", "m", "a")
         }
     }
 
@@ -93,7 +94,19 @@ class OverlayTest {
     fun `rejects an inverted or empty ground extent`() {
         assertFailsWith<IllegalArgumentException> {
             Overlay(FloatArray(8), 4, 2, 1400.0, 5000.0, 1000.0, 5200.0,
-                    "EPSG:32611", "s", "m")
+                    "EPSG:32611", "s", "m", "a")
+        }
+    }
+
+    @Test
+    fun `refuses to exist without the weights' attribution notice`() {
+        // CC BY-SA on the weights, trained on ODbL geometry: displaying the
+        // notice is a condition, not a courtesy. Enforced in the constructor
+        // because a rule you only have to remember at paint time is one that
+        // eventually gets forgotten there.
+        assertFailsWith<IllegalArgumentException> {
+            Overlay(FloatArray(8), 4, 2, 1000.0, 5000.0, 1400.0, 5200.0,
+                    "EPSG:32611", "s", "m", "   ")
         }
     }
 
