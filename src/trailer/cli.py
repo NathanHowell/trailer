@@ -80,6 +80,60 @@ def cmd_harvest(args) -> int:
     return 0
 
 
+def cmd_vet(args) -> int:
+    import shutil
+
+    from . import harvest as harvest_mod
+    from .aois import load_harvest
+
+    root = Path(args.root)
+    registry = Path(args.registry)
+    entries = load_harvest(registry)
+    if not entries:
+        print(f"no harvest registry at {registry}", file=sys.stderr)
+        return 1
+
+    dirs = [root / a.slug for a in entries]
+    verdicts = harvest_mod.vet(dirs)
+    built = [v for v in verdicts if "not built" not in v["reasons"]]
+    ok = [v for v in verdicts if v["accepted"]]
+    bad = [v for v in built if not v["accepted"]]
+
+    print(f'{"tile":26s} {"grnd/m2":>8s} {"valid":>6s} {"km":>6s} '
+          f'{"SNR":>18s}  verdict')
+    print("-" * 88)
+    for v in sorted(verdicts, key=lambda r: (r["accepted"], r["key"])):
+        if "not built" in v["reasons"]:
+            continue
+        snr = " ".join(f'{c[:4]}={s}' for c, s in (v.get("snr") or {}).items())
+        gd = v.get("ground_density")
+        vf = v.get("valid_frac")
+        print(f'{v["key"]:26s} {gd if gd is None else f"{gd:8.1f}":>8} '
+              f'{vf if vf is None else f"{vf:6.2f}":>6} {v.get("trail_km", 0):6.2f} '
+              f'{snr:>18s}  '
+              f'{"ok" if v["accepted"] else "; ".join(v["reasons"])}')
+
+    print(f"\n{len(built)} built, {len(ok)} accepted, {len(bad)} rejected")
+    (root / "vet.json").write_text(json.dumps(verdicts, indent=1))
+
+    if args.apply:
+        keep = {v["key"] for v in ok}
+        harvest_mod.write_registry([a for a in entries if a.key in keep], registry)
+        print(f"rewrote {registry} with {len(keep)} tiles")
+        if args.prune:
+            freed = 0
+            for v in bad:
+                d = root / v["key"]
+                if d.exists():
+                    freed += sum(f.stat().st_size for f in d.rglob("*"))
+                    shutil.rmtree(d)
+            print(f"pruned {len(bad)} rejected tiles, freed {freed / 1e9:.2f} GB")
+    elif bad:
+        print("re-run with --apply to drop them from the registry "
+              "(add --prune to delete their files)")
+    return 0
+
+
 def cmd_build(args) -> int:
     root = Path(args.root)
     aois = select(args.aoi, args.role)
@@ -238,6 +292,15 @@ def main(argv=None) -> int:
     h.add_argument("--registry", default="data/harvest.json")
     h.add_argument("--refresh", action="store_true", help="re-query Overpass")
     h.set_defaults(fn=cmd_harvest)
+
+    v = sub.add_parser("vet", parents=[common],
+                       help="check harvested tiles for data quality")
+    v.add_argument("--registry", default="data/harvest.json")
+    v.add_argument("--apply", action="store_true",
+                   help="drop rejected tiles from the registry")
+    v.add_argument("--prune", action="store_true",
+                   help="with --apply, also delete their files")
+    v.set_defaults(fn=cmd_vet)
 
     sub.add_parser("qa", parents=[common],
                    help="measure tread signal per tile").set_defaults(fn=cmd_qa)

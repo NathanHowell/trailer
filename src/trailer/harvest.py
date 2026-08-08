@@ -184,6 +184,61 @@ def select_cells(cells: list[dict], limit: int, cache_dir: Path,
     return chosen
 
 
+#: Vetting gates. Every one of these is a *data quality* test. Signal strength
+#: is deliberately not among them: faint trails have low SNR by construction
+#: (junction_pass measures 1.01), so rejecting weak-signal tiles would discard
+#: precisely the examples harvest exists to gather. SNR is recorded instead, for
+#: stratified evaluation.
+MIN_GROUND_DENSITY = 2.0   # /m2; below this a 0.5 m grid is mostly interpolation
+MIN_VALID_FRAC = 0.85      # fraction of the tile with real ground returns
+MIN_TRAIL_KM = 0.30        # a way clipped to a sliver is not worth a tile
+
+
+def vet_tile(d: Path) -> dict:
+    """Judge one built tile on data quality. Returns a verdict record."""
+    from . import qa
+
+    rec: dict = {"key": d.name, "reasons": []}
+    manifest_path = d / "manifest.json"
+    if not manifest_path.exists():
+        return rec | {"accepted": False, "reasons": ["not built"]}
+    m = json.loads(manifest_path.read_text())
+    if "error" in m:
+        return rec | {"accepted": False, "reasons": [f"build error: {m['error']}"]}
+
+    points = m.get("points") or {}
+    raster = m.get("raster") or {}
+    labels = m.get("labels") or {}
+    gd = points.get("ground_density")
+    vf = raster.get("valid_frac")
+    km = labels.get("trail_km", 0.0)
+    rec |= {"ground_density": gd, "valid_frac": vf, "trail_km": km,
+            "positive_frac": labels.get("positive_frac")}
+
+    if gd is not None and gd < MIN_GROUND_DENSITY:
+        rec["reasons"].append(f"ground density {gd:.1f}/m2 < {MIN_GROUND_DENSITY}")
+    if vf is not None and vf < MIN_VALID_FRAC:
+        rec["reasons"].append(f"valid fraction {vf:.2f} < {MIN_VALID_FRAC}")
+    if km < MIN_TRAIL_KM:
+        rec["reasons"].append(f"only {km:.2f} km of trail in tile")
+
+    # Recorded, never a gate.
+    try:
+        signal = qa.analyse(d)
+        rec["snr"] = {c: round(signal[c]["snr"], 2) for c in qa.CLASSES
+                      if isinstance(signal.get(c), dict) and "snr" in signal[c]}
+    except Exception as exc:
+        rec["snr"] = {}
+        log.debug("qa failed on %s: %s", d.name, exc)
+
+    rec["accepted"] = not rec["reasons"]
+    return rec
+
+
+def vet(dirs: list[Path]) -> list[dict]:
+    return [vet_tile(d) for d in dirs]
+
+
 def write_registry(aois: list[Aoi], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(
