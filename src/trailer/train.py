@@ -30,7 +30,8 @@ log = logging.getLogger(__name__)
 
 def _loaders(dirs: list[Path], cfg) -> tuple[DataLoader, DataLoader]:
     train = TileDataset(dirs, crop=cfg.crop, split="train",
-                        samples=cfg.samples, augment=True)
+                        samples=cfg.samples, augment=True,
+                        noise=cfg.noise, band_dropout=cfg.band_dropout)
     val = TileDataset(dirs, crop=cfg.crop, split="val",
                       samples=max(cfg.samples // 8, 64), augment=False)
     common = dict(batch_size=cfg.batch, num_workers=cfg.workers,

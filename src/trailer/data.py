@@ -2,6 +2,15 @@
 
 Two sampling decisions carry most of the weight here:
 
+Augmentation is deliberately limited to transforms that need no interpolation.
+D4 -- the eight dihedral transforms -- is a pure array permutation, and terrain
+has no canonical orientation, so it is free diversity. Arbitrary rotation,
+stretching and elastic warps are not used: the signal is 15-100 mm of relief in
+bands clipped to +-0.5 m, on tread 2-3 pixels wide, and bilinear resampling
+smooths away exactly what the model has to see. The augmentation that does pay
+here is noise, because detectability is governed by the tread-to-roughness
+ratio rather than by tread depth.
+
 * **Positive-biased crops.** Trails cover 0.5-1% of pixels. Uniform random crops
   would be almost entirely empty, so half of each batch is centred on a labelled
   trail pixel and half is drawn uniformly. The uniform half is not padding --
@@ -81,13 +90,15 @@ class TileDataset(Dataset):
 
     def __init__(self, dirs: list[Path], crop: int = 384, split: str = "train",
                  samples: int = 2000, positive_frac: float = 0.5,
-                 augment: bool = True, noise: float = 0.02, seed: int = 1234):
+                 augment: bool = True, noise: float = 0.06,
+                 band_dropout: float = 0.15, seed: int = 1234):
         self.crop = crop
         self.split = split
         self.samples = samples
         self.positive_frac = positive_frac
         self.augment = augment and split == "train"
         self.noise = noise
+        self.band_dropout = band_dropout
         self._open: dict[str, tuple] = {}
         self._rng: np.random.Generator | None = None
 
@@ -221,9 +232,19 @@ class TileDataset(Dataset):
             if rng.random() < 0.5:
                 x, y, w = (a[..., ::-1] for a in (x, y, w))
             if self.noise:
-                # Terrain roughness varies 65-500 mm across the survey; a little
-                # band noise stops the model keying on one substrate's texture.
-                x = x + rng.normal(0, self.noise, x.shape).astype("float32")
+                # Sweep the signal-to-noise ratio, not just add a fixed jitter.
+                # Terrain noise runs 65 mm in sandy meadow to 500 mm in alpine
+                # talus while tread stays 15-100 mm, so detectability is the
+                # ratio -- and it is the axis the faint trails fail on. A fixed
+                # sigma trains one point on that range; a sampled one covers it.
+                sigma = rng.uniform(0.0, self.noise)
+                x = x + rng.normal(0, sigma, x.shape).astype("float32")
+            if self.band_dropout and rng.random() < self.band_dropout:
+                # Canopy structure varies with forest type and region, and the
+                # tread signature does not depend on it. Withholding chm/vdi
+                # some of the time stops the model leaning on them.
+                x = x.copy()
+                x[4:6] = 0.0
 
         return (torch.from_numpy(np.ascontiguousarray(x)),
                 torch.from_numpy(np.ascontiguousarray(y)),

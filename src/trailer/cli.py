@@ -264,6 +264,11 @@ def main(argv=None) -> int:
                    help="clDice loss weight (0 disables the topology term)")
     t.add_argument("--cldice-warmup", type=int, default=3,
                    help="epochs before clDice is ramped in")
+    t.add_argument("--noise", type=float, default=0.06,
+                   help="max sigma of injected band noise; sampled per crop to "
+                        "sweep the tread-to-roughness ratio (0 disables)")
+    t.add_argument("--band-dropout", type=float, default=0.15,
+                   help="probability of withholding the chm/vdi canopy bands")
     t.add_argument("--workers", type=int, default=4)
     t.add_argument("--device", default=None, help="cuda / mps / cpu")
     t.add_argument("--tta", action="store_true",
