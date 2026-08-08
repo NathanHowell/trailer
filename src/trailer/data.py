@@ -117,6 +117,19 @@ def block_max(a: np.ndarray, k: int) -> np.ndarray:
     return a if k == 1 else _fold(a, k).max(axis=(-3, -1))
 
 
+def _shift(a: np.ndarray, dr: int, dc: int) -> np.ndarray:
+    """Translate an array, filling exposed edges with zero."""
+    if dr == 0 and dc == 0:
+        return a
+    out = np.zeros_like(a)
+    sr0, dr0 = (0, dr) if dr >= 0 else (-dr, 0)
+    sc0, dc0 = (0, dc) if dc >= 0 else (-dc, 0)
+    h = a.shape[-2] - abs(dr)
+    w = a.shape[-1] - abs(dc)
+    out[..., dr0:dr0 + h, dc0:dc0 + w] = a[..., sr0:sr0 + h, sc0:sc0 + w]
+    return out
+
+
 def block_nanmean(a: np.ndarray, k: int) -> np.ndarray:
     """Mean over valid cells; NaN only where the whole block is nodata."""
     if k == 1:
@@ -139,7 +152,8 @@ class TileDataset(Dataset):
                  body_crop: int = 256, split: str = "train",
                  samples: int = 2000, positive_frac: float = 0.5,
                  augment: bool = True, noise_m: float = 0.05,
-                 canopy_dropout: float = 0.15, seed: int = 1234):
+                 canopy_dropout: float = 0.15, jitter_m: float = 2.0,
+                 seed: int = 1234):
         self.variant = variant
         self.body_crop = body_crop
         self.split = split
@@ -148,6 +162,7 @@ class TileDataset(Dataset):
         self.augment = augment and split == "train"
         self.noise_m = noise_m
         self.canopy_dropout = canopy_dropout
+        self.jitter_m = jitter_m
         self._open: dict[str, tuple] = {}
         self._rng: np.random.Generator | None = None
 
@@ -336,6 +351,19 @@ class TileDataset(Dataset):
         w = block_mean(w, lk)
         # A body pixel is trainable only if it was fully covered by real ground.
         w = w * (block_mean(valid.astype("float32"), lk) > 0.999)
+
+        if self.augment and self.jitter_m:
+            # Shift the labels bodily against the terrain. Most Sierra trail
+            # geometry in OSM was traced from satellite imagery, so its error is
+            # a rigid per-way offset -- a way was digitised in one sitting off
+            # one image -- rather than per-vertex noise. Jittering the whole
+            # crop's labels models that mechanism; jittering vertices would not.
+            # Exposed pixels become weight 0: after a shift their true label is
+            # genuinely unknown, and inventing one would teach the model an edge.
+            r = self.jitter_m / var_mod.BODY_RES
+            dr = int(round(rng.uniform(-r, r)))
+            dc = int(round(rng.uniform(-r, r)))
+            y, w = (_shift(a, dr, dc) for a in (y, w))
 
         return tuple(torch.from_numpy(np.ascontiguousarray(a))
                      for a in (z, canopy, y, w))

@@ -38,7 +38,8 @@ def _loaders(dirs: list[Path], variants, cfg) -> dict[str, tuple]:
     for v in variants:
         train = TileDataset(dirs, v, body_crop=cfg.crop, split="train",
                             samples=cfg.samples, augment=True,
-                            noise_m=cfg.noise_m, canopy_dropout=cfg.canopy_dropout)
+                            noise_m=cfg.noise_m, canopy_dropout=cfg.canopy_dropout,
+                            jitter_m=cfg.jitter_m)
         val = TileDataset(dirs, v, body_crop=cfg.crop, split="val",
                           samples=max(cfg.samples // 8, 64), augment=False)
         out[v.key] = (DataLoader(train, shuffle=False, drop_last=True, **common),
@@ -151,7 +152,10 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
     model_mod.set_output_prior(net, prior, cfg.pos_weight)
     log.info("effective neg:pos after sampling and pos_weight: %.1f:1",
              (1 - prior) / max(prior * cfg.pos_weight, 1e-9))
-    criterion = TrailLoss(cldice_w=cfg.cldice, pos_weight=cfg.pos_weight)
+    criterion = TrailLoss(cldice_w=cfg.cldice, pos_weight=cfg.pos_weight,
+                          tolerance_m=cfg.tolerance_m, res=res)
+    log.info("loss tolerance %.1f m (%d px); label jitter +/-%.1f m",
+             cfg.tolerance_m, criterion.radius, cfg.jitter_m)
     opt = torch.optim.AdamW(_param_groups(net, cfg.lr), weight_decay=1e-4)
 
     # Every variant contributes an optimiser step per batch index, so the
@@ -169,6 +173,7 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
     meta = {"arch": cfg.arch, "encoder": cfg.encoder,
             "variants": [v.key for v in variants], "crop": cfg.crop,
             "body_res": res, "prior": round(prior, 5),
+            "tolerance_m": cfg.tolerance_m, "jitter_m": cfg.jitter_m,
             "tiles": [d.name for d in train_dirs]}
 
     best = -1.0

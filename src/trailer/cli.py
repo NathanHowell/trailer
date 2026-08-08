@@ -398,6 +398,12 @@ def main(argv=None) -> int:
                    help="max sigma of injected elevation noise in METRES; "
                         "sampled per crop to sweep the tread-to-roughness "
                         "ratio (0 disables)")
+    t.add_argument("--tolerance-m", type=float, default=5.0,
+                   help="relax the region losses at this radius, matching the "
+                        "scoring tolerance; 0 trains pixel-exact")
+    t.add_argument("--jitter-m", type=float, default=2.0,
+                   help="random rigid label offset per crop, modelling the "
+                        "imagery-derived misalignment in OSM geometry")
     t.add_argument("--canopy-dropout", type=float, default=0.15,
                    help="probability of withholding the chm/vdi canopy bands "
                         "from a canopy-bearing variant")
