@@ -9,8 +9,15 @@ overlay a mapper traces over is a different thing entirely.
 
 ## Status
 
-Data pipeline and survey are done. The training stack runs end to end; no
-model has been trained on the full tile set yet.
+Data pipeline, survey and training stack are done and run end to end. A 74-tile
+build (14 curated + 60 harvested) is in flight; no model has been trained on the
+full set yet.
+
+The model takes **bare-earth elevation in metres**, not pre-computed rasters.
+Terrain derivatives are torch layers inside the graph, so an exported ONNX file
+is self-contained: the plugin feeds it one float32 DEM tile and gets a
+probability map back, with the median filters, variance windows and
+normalisation constants sealed in alongside the weights.
 
 ## Requirements
 
@@ -19,11 +26,12 @@ PDAL and GDAL are used as command-line tools, not Python packages:
 ```sh
 brew install pdal gdal
 uv sync                 # data pipeline
-uv sync --extra train   # adds torch + segmentation-models-pytorch
+uv sync --extra train   # adds torch, segmentation-models-pytorch, onnx
 ```
 
-Inference in JOSM will go through ONNX Runtime's Java API, so torch is an
-optional extra rather than a dependency.
+Inference in JOSM goes through ONNX Runtime's Java API, so torch is an optional
+extra rather than a dependency. Export needs `onnx` only — not `onnxscript`,
+since it uses the TorchScript exporter rather than dynamo.
 
 ## Usage
 
@@ -33,28 +41,43 @@ uv run trailer build --aoi all            # point clouds -> features -> labels
 uv run trailer build --aoi giant_forest --res 0.25
 uv run trailer qa                         # measured tread signal per tile
 uv run trailer preview --aoi moraine_lake # hillshade + label overlay PNG
-uv run trailer train --epochs 40           # U-Net, BCE + Tversky + clDice
+uv run trailer harvest --limit 60         # find tiles rich in faint/lifecycle way
+uv run trailer vet                        # data-quality gates on harvested tiles
+uv run trailer train --epochs 40          # U-Net, BCE + Tversky + clDice
 uv run trailer predict --aoi colby_pass --tta
+uv run trailer export --variant dem1      # ONNX for the JOSM plugin
 ```
 
 Each tile lands in `data/tiles/<key>/`:
 
 | file | contents |
 | --- | --- |
-| `points.laz` | 3DEP point cloud, reprojected to UTM |
-| `features.tif` | 6-band model input (see below) |
+| `points.laz` | 3DEP point cloud, reprojected to UTM; deleted by `--evict-points` |
+| `dtm_clean.tif` | bare-earth DTM in metres — **the model's actual input** |
+| `features.tif` | 6-band derived stack; now read only for `chm` and `vdi` |
 | `labels.tif` | target / weight / ignore |
-| `dtm_clean.tif` | bare-earth DTM, for hillshade review |
 | `manifest.json` | provenance, density, label statistics |
+
+A built tile is ~420 MB, of which ~78 MB is worth keeping. Bulk runs assume
+`--evict-points`; without it sixty tiles is 25 GB.
 
 ## What the survey established
 
 Numbers below are measured, not assumed. See `trailer qa`.
 
-**Work at 0.25–0.5 m, not 1 m.** 3DEP ground-return density across the Sierra
-is a consistent 6–13 pts/m² regardless of canopy, because the survey spec
-targets ground returns. Trail tread is ~1–1.5 m wide and 15–100 mm deep; at 1 m
-per pixel you average it away.
+**1 m is not disqualifying — and that reverses an early call.** 3DEP
+ground-return density across the Sierra is a consistent 6–13 pts/m² regardless
+of canopy, because the survey spec targets ground returns, so 0.5 m is cheap to
+produce. The survey originally concluded that 1 m would average the tread away,
+reasoning from a 1–1.5 m tread width. Measured, that reasoning had the wrong
+feature in mind: the mean cross-section is **4–9 m wide** — the bench-and-berm
+earthwork, not the tread notch — and the millimetre figure is its *depth*, which
+block-averaging preserves. Over ten tiles, median incision retained at 1 m is
+1.10–1.12 for active and faint ways and 0.87 for lifecycle ones.
+
+The exception falls exactly where it hurts: `junction_pass`'s faint way halves,
+26.2 → 12.9 mm. So 1 m is usable, and sub-metre earns its cost precisely at the
+weak end. Both are trained jointly rather than chosen between — see *Model*.
 
 **The signal is spatial, not per-pixel.** Pixelwise AUC for terrain derivatives
 (micro-relief, slope, roughness, curvature) is 0.51–0.56 — near chance. Ridge
@@ -104,9 +127,22 @@ are marked *ignore*, not negative.
 | `chm` | canopy gap over the corridor |
 | `vdi` | low/high vegetation ratio; cleared understory |
 
-Absolute elevation is deliberately absent. The network must key on tens of
-millimetres of local relief, and 2000 m of regional topography only wastes
-capacity.
+The first four are computed **inside the model** (`preprocess.py`) from raw
+elevation, at whatever pixel size that variant carries. Every window is defined
+in metres, so a band means the same thing at 0.5 m and at 1 m; the clip bounds
+scale with the window actually used, without which the 3 px floor saturated 15%
+of the roughness band at 1 m before the network saw it.
+
+`chm` and `vdi` cannot be recovered from a DTM — they need the point cloud — so
+bare-earth variants do without them entirely.
+
+Absolute elevation is deliberately absent, and removed inside the graph. Every
+derivative is a local difference, so a constant offset cancels algebraically but
+not in float32: at 3000 m the representable spacing is 0.24 mm, 1.6% of a 15 mm
+tread. Centring first makes the cancellation exact. The same trap caught
+roughness, where `E[z²] - E[z]²` on raw elevation drifted by 7% of the band's own
+spread — and the drift grew with elevation, so identical terrain scored
+differently at 300 m and 3000 m. De-trending over 6 m first fixes it.
 
 ## Labels
 
@@ -125,10 +161,45 @@ adjacent to the mapped line would punish the model for finding the real tread.
 
 ## Model
 
-U-Net with an ImageNet-pretrained ResNet-34 encoder, 6 input bands, one output
-channel. Pretraining earns its place even though micro-relief looks nothing like
-photographs — the early layers are edge and ridge detectors, and 14 km² is far
-too little data to learn those from scratch.
+U-Net with an ImageNet-pretrained ResNet-34 encoder, one output channel.
+Pretraining earns its place even though micro-relief looks nothing like
+photographs — the early layers are edge and ridge detectors, and this is far too
+little data to learn those from scratch.
+
+### Input variants
+
+What JOSM can reach at runtime is the USGS 3DEP ImageServer: `pixelType F32`,
+one band, 1 m, **bare earth**. Real float elevation rather than a rendered
+hillshade, which is the good news; the bad news is that going to 1 m and losing
+canopy are the same event. Training only on 0.5 m six-band stacks would produce
+a model that cannot be deployed at all.
+
+| variant | source | pixel size | bands |
+| --- | --- | --- | --- |
+| `lidar05` | our own point-cloud stacks | 0.5 m | all six |
+| `dem1` | 3DEP ImageServer — the runtime case | 1 m | four, bare earth |
+| `lidar1` | as `lidar05`, decimated | 1 m | all six; isolates resolution from band loss |
+
+Each variant gets its own small stem — 32k of 24.6M parameters — feeding one
+shared trunk and head. The trunk always runs at 1 m, so its kernels mean one
+fixed physical size rather than having to be scale-invariant, and the stems
+absorb the difference. A 0.5 m stem is stride-2, which lets it learn a matched
+filter across the tread *before* decimating rather than mean-pooling the detail
+away. The alternative — one model per source — would split an already small
+training set in half.
+
+Variants interleave step by step during training, not epoch by epoch, so the
+trunk never spends a stretch seeing one input scale and drifting towards it.
+Selection is on the mean relaxed F1 across variants: optimising the 0.5 m path
+alone would quietly let the deployable one rot. Held-out tiles are scored per
+variant, so the gap between them prices what deploying against a public DEM
+costs instead of our own point clouds.
+
+**Output is at 1 m for every variant**, and the 0.5 m path is supervised against
+max-pooled 1 m labels. Sub-metre input buys signal *fidelity*, not output
+*resolution*. Against a 5 m label tolerance that is not the binding constraint,
+but it is a real choice — per-resolution heads would restore 0.5 m output at the
+cost of a shared head.
 
 Three loss terms, each covering what the others miss:
 
@@ -167,16 +238,62 @@ once at the end of a run, on full tiles with sliding-window inference. They are
 a test set; selecting on them would spend the only honest estimate of
 abandoned-trail recall and false-positive rate that exists.
 
+**Augmentation** is limited to transforms needing no interpolation. D4 — the
+eight dihedral transforms — is a pure array permutation, and terrain has no
+canonical orientation, so it is free diversity. Arbitrary rotation, stretching
+and elastic warps are not used: bilinear resampling smooths away exactly the
+relief the model has to see. Noise is injected into *elevation, in metres*,
+where a sensor actually puts it, and its sigma is swept per crop rather than
+fixed — detectability is the tread-to-roughness ratio, and that ratio is the
+axis faint trails fail on.
+
 Inference blends 50%-overlapping windows under a 2-D Hann taper, with optional
-D4 test-time augmentation — terrain has no canonical orientation, so averaging
-the eight dihedral transforms is nearly free accuracy at 8× the compute.
+D4 test-time augmentation — nearly free accuracy at 8× the compute.
+
+## Deployment
+
+`trailer export --variant dem1` freezes one bare-earth variant to ONNX:
+
+```
+input   elevation_m         (1, 1, N, N) float32, metres, NaN for nodata
+output  trail_probability   (1, 1, N, N) float32, at 1 m
+```
+
+The window is fixed rather than dynamic. That is a real constraint of the
+architecture, not an export limitation — a ResNet-34 U-Net needs its input
+divisible by 32 — and it costs nothing, because the plugin must tile with a
+Hann-tapered overlapping window regardless.
+
+Export goes through the TorchScript exporter, not dynamo, which fails on the
+stems' BatchNorm. The one op with no ONNX equivalent is the median filter;
+`im2col` + `TopK` reproduces `scipy.ndimage.median_filter` bit-for-bit at
+k = 3, 4, 10, 20, including the lower-median convention for even k. A round trip
+through onnxruntime on real elevation matches torch to 2.7e-6.
 
 ## Areas
 
-Fourteen tiles spanning 1941–3690 m, 1.4–71% canopy, 10–530 m relief, and
-granite / volcanic / sand / talus substrates. `north_guard` has no mapped ways
-at all and exists solely to measure false-positive rate — everywhere else, an
-apparent false positive may be a real unmapped trail.
+**Fourteen curated tiles** spanning 1941–3690 m, 1.4–71% canopy, 10–530 m
+relief, and granite / volcanic / sand / talus substrates. `north_guard` has no
+mapped ways at all and exists solely to measure false-positive rate — everywhere
+else, an apparent false positive may be a real unmapped trail.
+
+**Sixty harvested tiles**, because the curated set spans *terrain* well and the
+thing the model must find badly: of 35.2 km of labelled trail in it, 34.2 km is
+active, 0.98 km faint, and **none at all** lifecycle-tagged. `trailer harvest`
+asks Overpass for every faint and lifecycle-tagged way in the High Sierra,
+bins them onto a 1 km grid, and ranks cells by how much of that kind of way they
+hold — 1202 ways over 1453 cells, of which the top 60 carry 142.6 km, roughly
+145× the faint evidence available before.
+
+Held-out tiles are excluded with a 600 m buffer, which has to exceed the model's
+context window rather than merely the tile edge, or a training crop can see
+pixels a held-out crop also sees.
+
+`trailer vet` gates harvested tiles on ground density, valid fraction and
+in-tile trail length. Signal strength is deliberately *not* among the gates:
+faint trails are low-SNR by construction, so rejecting weak-signal tiles would
+discard precisely the examples harvesting exists to gather. SNR is recorded
+instead, for stratified evaluation.
 
 ## Prior art worth reading
 
