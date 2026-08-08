@@ -82,9 +82,11 @@ AOIS: tuple[Aoi, ...] = (
     # ---- abandoned-trail evaluation ---------------------------------------
     Aoi("junction_pass", "Junction Pass old trail", 36.69005, -118.34841,
         role="eval",
-        notes="3690 m, 530 m relief. Pre-1932 JMT route. Active tread 63 mm "
-              "vs abandoned 15 mm in identical terrain -- the reference tile "
-              "for abandoned-trail recall."),
+        notes="3690 m, 530 m relief. Pre-1932 JMT route. Carries a paired "
+              "trail_visibility=intermediate and trail_visibility=horrible way "
+              "in identical terrain -- the reference tile for faint-trail "
+              "recall. Note the old route is graded by trail_visibility here, "
+              "NOT by a lifecycle prefix: this tile has zero lifecycle ways."),
     Aoi("abandoned_south", "Abandoned trail (Kern side)", 36.42955, -118.43660,
         role="eval",
         notes="Paired abandoned:highway=path and active path."),

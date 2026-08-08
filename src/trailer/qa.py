@@ -65,8 +65,24 @@ def profile_stats(profiles: np.ndarray, offsets: np.ndarray) -> dict:
     }
 
 
+#: Visibility grades that make a way "faint" for reporting. These are the ways
+#: the project exists to find, so pooling them with clear trails -- as an
+#: active/lifecycle split alone does -- hides the only comparison that matters.
+FAINT_VISIBILITY = frozenset({"bad", "horrible", "no"})
+
+CLASSES = ("active", "faint", "lifecycle")
+
+
+def _bucket(tags: dict) -> str:
+    if any(f"{p}:highway" in tags for p in osm.LIFECYCLE_PREFIXES):
+        return "lifecycle"
+    if tags.get("trail_visibility") in FAINT_VISIBILITY:
+        return "faint"
+    return "active"
+
+
 def analyse(aoi_dir: Path) -> dict:
-    """Measure tread signal separately for active and lifecycle-tagged ways."""
+    """Measure tread signal separately per visibility class."""
     manifest = json.loads((aoi_dir / "manifest.json").read_text())
     epsg = manifest["epsg"]
     res = manifest["res"]
@@ -83,7 +99,7 @@ def analyse(aoi_dir: Path) -> dict:
 
     tf = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
     elements = json.loads((aoi_dir / "osm.json").read_text())["elements"]
-    groups: dict[str, list[LineString]] = {"active": [], "lifecycle": []}
+    groups: dict[str, list[LineString]] = {c: [] for c in CLASSES}
     for el in elements:
         geom = el.get("geometry") or []
         if len(geom) < 2:
@@ -92,10 +108,8 @@ def analyse(aoi_dir: Path) -> dict:
         kind = osm.classify(tags)
         if kind is None or kind[0] != "trail":
             continue
-        bucket = ("lifecycle" if any(f"{p}:highway" in tags
-                                     for p in osm.LIFECYCLE_PREFIXES) else "active")
-        groups[bucket].append(LineString([tf.transform(p["lon"], p["lat"])
-                                          for p in geom]))
+        groups[_bucket(tags)].append(
+            LineString([tf.transform(p["lon"], p["lat"]) for p in geom]))
 
     offsets = np.arange(-HALF_WIDTH_M, HALF_WIDTH_M + res, res)
     inv = ~transform
@@ -126,7 +140,7 @@ def summarise(results: list[dict]) -> str:
         if "error" in r:
             lines.append(f'{r.get("aoi","?"):22s} {r["error"]}')
             continue
-        for cls in ("active", "lifecycle"):
+        for cls in CLASSES:
             s = r.get(cls)
             if not s or "note" in s:
                 continue

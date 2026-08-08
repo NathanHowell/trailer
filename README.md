@@ -69,11 +69,19 @@ noise runs 65 mm in a sandy meadow to 500 mm in alpine talus, while tread is
 15–100 mm throughout. Detectability is the ratio.
 
 **LiDAR sees construction, not traffic.** At Junction Pass, in identical
-terrain, an active trail shows 63 mm of berm-to-tread incision and a trail
-abandoned since 1932 still shows 15 mm. What survives is the earthwork. The
-method will be strongest on old *constructed* trails — stock routes, CCC-era
+terrain, the active trail shows 45.7 mm of berm-to-tread incision and the
+pre-1932 route beside it still shows 9.8 mm. What survives is the earthwork.
+The method will be strongest on old *constructed* trails — stock routes, CCC-era
 work, mining tracks — and weakest on unconstructed use trails no matter how
 heavily walked.
+
+**Faint is much harder than the average tile suggests.** Stratified by
+`trail_visibility`, faint ways run SNR 0.8–4.1 against 2.4–15.2 for clear ones.
+`blackcap` inverts the order — its faint way scores *better* than its active one
+because it lies in quieter terrain (89 mm noise against 159 mm) — which is the
+roughness-as-denominator result appearing inside a single tile. Report faint
+recall separately from headline recall; a single pooled number is close to
+meaningless here.
 
 **Lifecycle tags must be labels.** `abandoned:highway`, `disused:highway` and
 friends account for 865 km of mapped-but-faint way in the Sierra. Omitting them

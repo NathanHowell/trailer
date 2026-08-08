@@ -44,14 +44,23 @@ BOUNDARY_RANGE = (0.55, 0.85)
 MAX_CENTRES = 20_000
 
 
-def _boundary(target: np.ndarray) -> int:
+def _boundary(target: np.ndarray, crop: int) -> int:
     """Column separating the train band from the validation band.
 
     Placed so roughly VAL_COL_FRAC of the tile's trail pixels fall to the right
     of it, then clamped so neither split can be starved of area.
+
+    The clamp also has to leave both bands at least one crop wide. Without that,
+    a tile whose trails sit far to the right pushes the boundary out until the
+    validation band is narrower than a crop and the tile silently drops out of
+    validation -- which is exactly what happened to the two weakest-signal tiles
+    in the set, quietly biasing validation optimistic.
     """
     w = target.shape[1]
     lo, hi = (int(w * f) for f in BOUNDARY_RANGE)
+    lo, hi = max(lo, crop), min(hi, w - crop)
+    if lo > hi:  # tile too narrow to split at all
+        lo = hi = w // 2
     per_col = (target > 0).sum(axis=0)
     total = per_col.sum()
     if total == 0:
@@ -115,7 +124,7 @@ class TileDataset(Dataset):
             h, w = s.height, s.width
             target = s.read(1)
 
-        boundary = _boundary(target)
+        boundary = _boundary(target, self.crop)
         col0, col1 = (0, boundary) if self.split == "train" else (boundary, w)
         # Crop origins must leave a full crop inside the split band.
         if col1 - col0 < self.crop or h < self.crop:
