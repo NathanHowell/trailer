@@ -418,9 +418,24 @@ object Dem3dep {
      * wastes a multi-megabyte download, and — worse — nothing downstream could
      * tell afterwards.
      */
-    fun fetch(bounds: Bounds, epsg: Int, width: Int, height: Int): Grid {
+    fun fetch(bounds: Bounds, epsg: Int, width: Int, height: Int): Grid =
+        fetchDescribed(bounds, epsg, width, height).grid
+
+    /** Elevation together with the catalog answer that authorised fetching it. */
+    data class Fetched(val grid: Grid, val coverage: Coverage)
+
+    /**
+     * As [fetch], but hands back the coverage it already had to ask for.
+     *
+     * The caller needs it: a mapper judging a heatmap needs to know which survey
+     * and which year it came from. Asking the catalog a second time to find that
+     * out would double the round trips per view, and worse, could answer
+     * differently from the request that was actually authorised.
+     */
+    fun fetchDescribed(bounds: Bounds, epsg: Int, width: Int, height: Int): Fetched {
         val cov = coverage(bounds, epsg)
         if (!cov.usable) throw UnsupportedCoverage(cov)
-        return decodeTiff(get(exportImageUrl(bounds, epsg, width, height)))
+        return Fetched(decodeTiff(get(exportImageUrl(bounds, epsg, width, height))),
+                       cov)
     }
 }
