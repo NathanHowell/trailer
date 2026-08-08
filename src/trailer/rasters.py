@@ -177,14 +177,24 @@ def _fill_nodata(a: np.ndarray) -> np.ndarray:
     return np.where(np.isnan(a), np.nanmedian(a), a)
 
 
-def derive_features(dtm: np.ndarray, chm: np.ndarray, low: np.ndarray,
-                    high: np.ndarray, res: float) -> np.ndarray:
-    """Stack the terrain derivatives the model actually consumes.
+#: Bands derivable from a bare-earth DTM alone. USGS publishes 3DEP as a 1 m
+#: bare-earth DEM, so this prefix is exactly what a JOSM plugin can obtain at
+#: runtime without a point cloud; ``chm`` and ``vdi`` are LiDAR-only.
+TERRAIN_BANDS = BAND_NAMES[:4]
+
+
+def derive_terrain(dtm: np.ndarray, res: float) -> np.ndarray:
+    """The four DTM-only bands, with every window defined in metres.
 
     Two micro-relief scales: ~2 m isolates the tread itself, ~10 m picks up the
     bench-and-berm cross-section that survives on constructed trails. Both are
     clipped tight -- the signal of interest is tens of millimetres, so a wide
     range would quantise it away.
+
+    Every window is sized from ``res``, so the same physical filter is applied
+    whatever the pixel size. That is what makes a 1 m stack comparable to a
+    0.5 m one in *value*; what changes across resolution is how many pixels the
+    cross-section spans, not what the numbers mean.
     """
     px = max(int(round(2.0 / res)), 3)
     px10 = max(int(round(10.0 / res)), 5)
@@ -199,18 +209,29 @@ def derive_features(dtm: np.ndarray, chm: np.ndarray, low: np.ndarray,
     rough = np.sqrt(np.clip(
         uniform_filter(dtm ** 2, win) - uniform_filter(dtm, win) ** 2, 0, None))
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        vdi = np.divide(low, high, out=np.zeros_like(low), where=high != 0)
-    vdi = np.clip(vdi, 0, 1)
-
     return np.stack([
         mrm2 / 0.5,
         mrm10 / 1.0,
         np.clip(slope / 60.0, 0, 1),
         np.clip(rough / 0.5, 0, 1),
-        np.clip(chm / 40.0, 0, 1),
-        vdi,
     ]).astype("float32")
+
+
+def derive_canopy(chm: np.ndarray, low: np.ndarray,
+                  high: np.ndarray) -> np.ndarray:
+    with np.errstate(divide="ignore", invalid="ignore"):
+        vdi = np.divide(low, high, out=np.zeros_like(low), where=high != 0)
+    return np.stack([
+        np.clip(chm / 40.0, 0, 1),
+        np.clip(vdi, 0, 1),
+    ]).astype("float32")
+
+
+def derive_features(dtm: np.ndarray, chm: np.ndarray, low: np.ndarray,
+                    high: np.ndarray, res: float) -> np.ndarray:
+    """Stack the terrain derivatives the model actually consumes."""
+    return np.concatenate([derive_terrain(dtm, res),
+                           derive_canopy(chm, low, high)]).astype("float32")
 
 
 def build_feature_stack(laz: Path, out_tif: Path, res: float,
