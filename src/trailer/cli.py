@@ -5,6 +5,8 @@
     uv run trailer build --aoi giant_forest,colby_pass --res 0.25
     uv run trailer qa                        # tread signal per tile
     uv run trailer preview --aoi moraine_lake
+    uv run trailer train --epochs 40         # U-Net + BCE/Tversky/clDice
+    uv run trailer predict --aoi colby_pass --tta
 """
 from __future__ import annotations
 
@@ -93,6 +95,69 @@ def cmd_preview(args) -> int:
     return 0
 
 
+def _built(root: Path, role: str | None) -> list[Path]:
+    dirs = [root / a.slug for a in select("all", role)]
+    return [d for d in dirs if (d / "manifest.json").exists()]
+
+
+def _tile_res(dirs: list[Path], fallback: float) -> float:
+    """Take pixel size from what was actually built, not from a flag."""
+    for d in dirs:
+        try:
+            return float(json.loads((d / "manifest.json").read_text())["res"])
+        except (OSError, KeyError, ValueError):
+            continue
+    return fallback
+
+
+def cmd_train(args) -> int:
+    from . import train as train_mod
+
+    root = Path(args.root)
+    train_dirs = _built(root, "train")
+    if not train_dirs:
+        print("no built training tiles -- run `trailer build` first", file=sys.stderr)
+        return 1
+    test_dirs = _built(root, "eval") + _built(root, "control")
+    args.res = _tile_res(train_dirs, args.res)
+    logging.info("train on %d tiles, hold out %d, %.2f m pixels",
+                 len(train_dirs), len(test_dirs), args.res)
+    report = train_mod.run(train_dirs, test_dirs, args)
+    print(f"\nbest relaxed F1 (val) {report['best_val_f1']:.4f}")
+    for name, rec in report["held_out"].items():
+        print(f"  {name:22s} f1@0.5 {rec['f1@0.5']:.3f}  "
+              f"recall {rec['r@0.5']:.3f}  fp {rec['fp_rate@0.5']:.5f}")
+    return 0
+
+
+def cmd_predict(args) -> int:
+    import rasterio
+    from . import infer
+    from . import model as model_mod
+
+    root = Path(args.root)
+    net, meta = model_mod.load(args.checkpoint, model_mod.pick_device(args.device))
+    for aoi in select(args.aoi, args.role):
+        d = root / aoi.slug
+        if not (d / "features.tif").exists():
+            logging.warning("%s not built, skipping", aoi.key)
+            continue
+        with rasterio.open(d / "features.tif") as s:
+            x = s.read().astype("float32")
+            profile = s.profile
+        prob = infer.predict(net, x, tile=meta.get("crop", 384),
+                             device=next(net.parameters()).device,
+                             batch=args.batch, tta=args.tta)
+        profile.update(count=1, dtype="float32", compress="deflate", predictor=2)
+        out = d / "proposal.tif"
+        with rasterio.open(out, "w", **profile) as dst:
+            dst.write(prob.astype("float32"))
+            dst.descriptions = ("trail_probability",)
+        print(f"wrote {out}  (mean {prob.mean():.4f}, "
+              f"{100 * (prob > 0.5).mean():.2f}% above 0.5)")
+    return 0
+
+
 def main(argv=None) -> int:
     # Shared flags live on a parent parser so they are accepted either side of
     # the subcommand -- `trailer build --aoi x` and `trailer --aoi x build`.
@@ -123,6 +188,42 @@ def main(argv=None) -> int:
                    help="measure tread signal per tile").set_defaults(fn=cmd_qa)
     sub.add_parser("preview", parents=[common],
                    help="render hillshade + label overlay").set_defaults(fn=cmd_preview)
+
+    t = sub.add_parser("train", parents=[common],
+                       help="train the segmentation model")
+    t.add_argument("--out", default="runs/latest", help="checkpoint directory")
+    t.add_argument("--arch", default="unet",
+                   choices=["unet", "unetpp", "deeplabv3p"])
+    t.add_argument("--encoder", default="resnet34")
+    t.add_argument("--no-pretrained", action="store_true")
+    t.add_argument("--crop", type=int, default=384,
+                   help="crop size in pixels (384 @ 0.5 m = 192 m of context)")
+    t.add_argument("--batch", type=int, default=8)
+    t.add_argument("--epochs", type=int, default=40)
+    t.add_argument("--samples", type=int, default=2000,
+                   help="crops drawn per epoch")
+    t.add_argument("--lr", type=float, default=3e-4)
+    t.add_argument("--pos-weight", type=float, default=8.0,
+                   help="BCE positive class weight; trails are ~0.7% of pixels")
+    t.add_argument("--cldice", type=float, default=0.5,
+                   help="clDice loss weight (0 disables the topology term)")
+    t.add_argument("--cldice-warmup", type=int, default=3,
+                   help="epochs before clDice is ramped in")
+    t.add_argument("--workers", type=int, default=4)
+    t.add_argument("--device", default=None, help="cuda / mps / cpu")
+    t.add_argument("--tta", action="store_true",
+                   help="D4 test-time augmentation for held-out scoring")
+    t.add_argument("--res", type=float, default=0.5,
+                   help="fallback pixel size if manifests are unreadable")
+    t.set_defaults(fn=cmd_train)
+
+    pr = sub.add_parser("predict", parents=[common],
+                        help="write a probability raster per tile")
+    pr.add_argument("--checkpoint", default="runs/latest/best.pt")
+    pr.add_argument("--batch", type=int, default=8)
+    pr.add_argument("--device", default=None)
+    pr.add_argument("--tta", action="store_true")
+    pr.set_defaults(fn=cmd_predict)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

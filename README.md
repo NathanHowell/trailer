@@ -9,7 +9,8 @@ overlay a mapper traces over is a different thing entirely.
 
 ## Status
 
-Data pipeline and survey are done. Model training is not started.
+Data pipeline and survey are done. The training stack runs end to end; no
+model has been trained on the full tile set yet.
 
 ## Requirements
 
@@ -17,8 +18,12 @@ PDAL and GDAL are used as command-line tools, not Python packages:
 
 ```sh
 brew install pdal gdal
-uv sync
+uv sync                 # data pipeline
+uv sync --extra train   # adds torch + segmentation-models-pytorch
 ```
+
+Inference in JOSM will go through ONNX Runtime's Java API, so torch is an
+optional extra rather than a dependency.
 
 ## Usage
 
@@ -28,6 +33,8 @@ uv run trailer build --aoi all            # point clouds -> features -> labels
 uv run trailer build --aoi giant_forest --res 0.25
 uv run trailer qa                         # measured tread signal per tile
 uv run trailer preview --aoi moraine_lake # hillshade + label overlay PNG
+uv run trailer train --epochs 40           # U-Net, BCE + Tversky + clDice
+uv run trailer predict --aoi colby_pass --tta
 ```
 
 Each tile lands in `data/tiles/<key>/`:
@@ -107,6 +114,44 @@ adjacent to the mapped line would punish the model for finding the real tread.
 
 `labels.tif` band 2 carries a per-pixel loss weight from `trail_visibility`
 (excellent 1.0 → no 0.35) with lifecycle-tagged ways at 0.6.
+
+## Model
+
+U-Net with an ImageNet-pretrained ResNet-34 encoder, 6 input bands, one output
+channel. Pretraining earns its place even though micro-relief looks nothing like
+photographs — the early layers are edge and ridge detectors, and 14 km² is far
+too little data to learn those from scratch.
+
+Three loss terms, each covering what the others miss:
+
+| term | covers |
+| --- | --- |
+| weighted BCE | per-pixel calibration; alone it collapses to all-background at 0.7% positives |
+| Tversky (α=0.3, β=0.7) | region overlap, false negatives penalised harder |
+| clDice | topology — Dice barely notices a one-pixel gap in a 1 m trail, but that gap is what makes a proposal unusable |
+
+Recall is deliberately bought at the cost of precision. A reviewer in JOSM
+dismisses a false positive in a second; a trail never drawn is invisible to
+them. clDice is ramped in after a few epochs, since skeletonising random early
+predictions produces gradients that fight the region terms.
+
+**Scoring** is relaxed precision/recall at a 5 m tolerance, not strict pixel
+overlap — a perfect prediction can miss the OSM centreline by three pixels and
+still be exactly what the mapper wants. Pixel AP is reported for comparison with
+the survey baselines, but never used for model selection: it rewards fattening
+predictions until they cover the label slop, and relaxed F1 does not.
+
+**Splits.** Each training tile reserves a column band for validation, with the
+boundary placed by label quantile rather than at a fixed fraction of width —
+trails cluster, and a fixed cut can hand validation a strip containing no trail
+at all. The eval-role tiles (abandoned trails) and the control tile are scored
+once at the end of a run, on full tiles with sliding-window inference. They are
+a test set; selecting on them would spend the only honest estimate of
+abandoned-trail recall and false-positive rate that exists.
+
+Inference blends 50%-overlapping windows under a 2-D Hann taper, with optional
+D4 test-time augmentation — terrain has no canonical orientation, so averaging
+the eight dihedral transforms is nearly free accuracy at 8× the compute.
 
 ## Areas
 
