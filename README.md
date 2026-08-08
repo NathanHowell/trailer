@@ -9,9 +9,14 @@ overlay a mapper traces over is a different thing entirely.
 
 ## Status
 
-Data pipeline, survey and training stack are done and run end to end. A 74-tile
-build (14 curated + 60 harvested) is in flight; no model has been trained on the
-full set yet.
+Data pipeline, survey and training stack are done and run end to end. The
+74-tile build (14 curated + 60 harvested) is complete: 231.9 km of labelled
+trail, 59 of 60 harvested tiles passing `trailer vet`. No model has been trained
+on the full set yet.
+
+Harvesting was the point of that build, and it worked. Trainable labels went
+from 34.2 km active / 0.98 faint / 0.00 lifecycle to **68.3 / 62.8 / 95.5** — a
+class balance of 30/27/42 instead of 97/3/0.
 
 The model takes **bare-earth elevation in metres**, not pre-computed rasters.
 Terrain derivatives are torch layers inside the graph, so an exported ONNX file
@@ -43,6 +48,8 @@ uv run trailer qa                         # measured tread signal per tile
 uv run trailer preview --aoi moraine_lake # hillshade + label overlay PNG
 uv run trailer harvest --limit 60         # find tiles rich in faint/lifecycle way
 uv run trailer vet                        # data-quality gates on harvested tiles
+uv run trailer dem                        # fetch USGS's published 1 m DEM per tile
+uv run trailer relabel                    # rebuild labels from cached OSM
 uv run trailer train --epochs 40          # U-Net, BCE + Tversky + clDice
 uv run trailer predict --aoi colby_pass --tta
 uv run trailer export --variant dem1      # ONNX for the JOSM plugin
@@ -53,10 +60,15 @@ Each tile lands in `data/tiles/<key>/`:
 | file | contents |
 | --- | --- |
 | `points.laz` | 3DEP point cloud, reprojected to UTM; deleted by `--evict-points` |
-| `dtm_clean.tif` | bare-earth DTM in metres — **the model's actual input** |
+| `dtm_clean.tif` | our bare-earth DTM in metres — input to 0.5 m variants |
+| `dem1m.tif` | USGS's published 1 m DEM — input to 1 m variants, incl. the deployable one |
 | `features.tif` | 6-band derived stack; now read only for `chm` and `vdi` |
-| `labels.tif` | target / weight / ignore |
+| `labels.tif` | target / weight / ignore / class |
 | `manifest.json` | provenance, density, label statistics |
+
+The two elevation rasters are not interchangeable. 1 m variants read `dem1m.tif`
+because that is what the plugin will be handed; a tile without one is skipped for
+those variants rather than silently substituted.
 
 A built tile is ~420 MB, of which ~78 MB is worth keeping. Bulk runs assume
 `--evict-points`; without it sixty tiles is 25 GB.
@@ -176,7 +188,16 @@ good for OSM, but still 3–6 pixels at 0.5 m. Hard negatives immediately
 adjacent to the mapped line would punish the model for finding the real tread.
 
 `labels.tif` band 2 carries a per-pixel loss weight from `trail_visibility`
-(excellent 1.0 → no 0.35) with lifecycle-tagged ways at 0.6.
+(excellent 1.0 → no 0.35) with lifecycle-tagged ways at 0.6. Band 4 codes which
+kind of way covers the pixel (active 1, faint 2, lifecycle 3), so metrics and the
+crop sampler can stratify instead of pooling a set that used to be 97% active.
+
+**The loss is tolerant at the same radius the metric scores at.** Training
+pixel-exact against geometry known to sit ~1.4 m off would spend gradient
+teaching the model to reproduce tracing error — measured, a strict loss saturates
+by 3 px, punishing a 3 m offset exactly as hard as predicting nothing. The
+relaxation is asymmetric like `metrics.relaxed`: the prediction is dilated for
+recall, the label for precision.
 
 ## Model
 
