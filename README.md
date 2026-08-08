@@ -65,19 +65,38 @@ A built tile is ~420 MB, of which ~78 MB is worth keeping. Bulk runs assume
 
 Numbers below are measured, not assumed. See `trailer qa`.
 
-**1 m is not disqualifying — and that reverses an early call.** 3DEP
+**1 m costs real signal, and the cost is worst where it hurts most.** 3DEP
 ground-return density across the Sierra is a consistent 6–13 pts/m² regardless
-of canopy, because the survey spec targets ground returns, so 0.5 m is cheap to
-produce. The survey originally concluded that 1 m would average the tread away,
-reasoning from a 1–1.5 m tread width. Measured, that reasoning had the wrong
-feature in mind: the mean cross-section is **4–9 m wide** — the bench-and-berm
-earthwork, not the tread notch — and the millimetre figure is its *depth*, which
-block-averaging preserves. Over ten tiles, median incision retained at 1 m is
-1.10–1.12 for active and faint ways and 0.87 for lifecycle ones.
+of canopy, because the survey spec targets ground returns, so 0.5 m is cheap for
+us to produce. The survey originally concluded 1 m would average the tread away,
+reasoning from a 1–1.5 m tread width. That reasoning had the wrong feature in
+mind — the mean cross-section is **4–9 m wide**, the bench-and-berm earthwork
+rather than the tread notch, and the millimetre figure is its *depth*.
 
-The exception falls exactly where it hurts: `junction_pass`'s faint way halves,
-26.2 → 12.9 mm. So 1 m is usable, and sub-metre earns its cost precisely at the
-weak end. Both are trained jointly rather than chosen between — see *Model*.
+But the conclusion still lands close to where it started, for a different
+reason. Measured against USGS's **published** 1 m DEM — which is what a JOSM
+plugin actually gets — median incision retained is:
+
+| class | retained at 1 m |
+| --- | --- |
+| active | 0.75 |
+| faint | 0.99 |
+| lifecycle | **0.54** |
+
+Lifecycle suffers most because those features are shallowest (7–22 mm here), so
+smoothing takes proportionally more of them — and lifecycle is both the hardest
+target and, after harvesting, the most abundant.
+
+An earlier version of this section reported 1.10–1.12 retained and called 1 m
+"not disqualifying". That measurement used a 2×2 block-mean of our own gridding
+as a stand-in for the published product, which is the friendly case: same
+interpolation, just coarser. The real product is gridded differently, and its
+tread-scale band correlates with ours at only r = 0.10–0.18 (see *Input
+variants*). Measure against the artefact you will actually deploy on.
+
+This is the argument for the 0.5 m stem rather than against 1 m: the sub-metre
+path retains what the published product loses, and both are trained jointly
+rather than chosen between — see *Model*.
 
 **The signal is spatial, not per-pixel.** Pixelwise AUC for terrain derivatives
 (micro-relief, slope, roughness, curvature) is 0.51–0.56 — near chance. Ridge

@@ -86,6 +86,16 @@ CLASS_MIX = {"active": 1 / 3, "faint": 1 / 3, "lifecycle": 1 / 3}
 #: Band of labels.tif carrying the class code (1-indexed for rasterio).
 CLASS_BAND = 4
 
+#: USGS's published 1 m DEM, fetched by `trailer dem`. Variants at BODY_RES read
+#: this rather than a block-mean of our own gridding, because they are not the
+#: same raster: measured across four tiles, slope and mrm_10m agree well
+#: (r 0.79-0.92) but the tread-scale mrm_2m band correlates at only r = 0.10-0.18
+#: with roughly half the amplitude. USGS grids from ground returns with its own
+#: interpolation and hydro-flattening, so the fine-scale content is different
+#: content, not a smoothed version of ours. Training on the proxy would leave the
+#: deployed model reading a band it had never seen.
+DEM_1M = "dem1m.tif"
+
 #: Bands of features.tif holding chm and vdi (1-indexed for rasterio).
 CANOPY_BANDS = (5, 6)
 
@@ -222,16 +232,35 @@ class TileDataset(Dataset):
         self.z_scale = int(round(variant.res / self.native_res))
         self.crop = body_crop * self.label_scale
 
+        # A variant at body resolution reads USGS's published DEM directly; one
+        # below it derives from our own point cloud. Different rasters, so this
+        # is a source choice rather than a resampling detail.
+        self.published = abs(variant.res - var_mod.BODY_RES) < 1e-9
+
         self.tiles = []
+        missing_dem = []
         for d in dirs:
             feats, lbls = d / "features.tif", d / "labels.tif"
             dtm = d / "dtm_clean.tif"
             if not (feats.exists() and lbls.exists() and dtm.exists()):
                 log.warning("%s not built, skipping", d.name)
                 continue
+            dem = d / DEM_1M
+            if self.published and not dem.exists():
+                # Falling back to the block-mean proxy would quietly train this
+                # tile on a distribution the deployed model never meets. Two
+                # tiles out of seventy-four is a cheap price for not doing that;
+                # `trailer dem` recovers them.
+                missing_dem.append(d.name)
+                continue
             info = self._index(d, feats, lbls, dtm)
             if info is not None:
+                info["dem"] = str(dem) if self.published else None
                 self.tiles.append(info)
+        if missing_dem:
+            log.warning("%s: skipped %d tiles with no %s (%s); run `trailer dem`",
+                        variant.key, len(missing_dem), DEM_1M,
+                        ", ".join(missing_dem[:4]))
         if not self.tiles:
             raise ValueError(f"no usable tiles for split={split!r} in {dirs}")
 
@@ -347,9 +376,9 @@ class TileDataset(Dataset):
 
     def _handles(self, tile: dict):
         """Open datasets lazily and per worker; rasterio handles do not fork."""
-        key = tile["dtm"]
+        key = tile["dem"] or tile["dtm"]
         if key not in self._open:
-            self._open[key] = (rasterio.open(tile["dtm"]),
+            self._open[key] = (rasterio.open(key),
                                rasterio.open(tile["labels"]),
                                rasterio.open(tile["feats"]))
         return self._open[key]
@@ -403,17 +432,24 @@ class TileDataset(Dataset):
             ti, row, col = self._draw(rng)
         tile = self.tiles[ti]
 
+        lk = self.label_scale
         win = Window(col, row, self.crop, self.crop)
         dsrc, lsrc, fsrc = self._handles(tile)
-        z = dsrc.read(1, window=win).astype("float32")
+        if tile["dem"]:
+            # Already at body resolution, so its window is in body pixels.
+            z = dsrc.read(1, window=Window(col // lk, row // lk,
+                                           self.body_crop, self.body_crop))
+            z = z.astype("float32")
+            valid = np.isfinite(z) & (z != 0.0)
+        else:
+            z = dsrc.read(1, window=win).astype("float32")
+            # build.py writes 0 for nodata; the model's contract is NaN, and its
+            # centring step then excludes those pixels from the tile mean.
+            valid = z != 0.0
         lab = lsrc.read(window=win).astype("float32")
         canopy = (fsrc.read(CANOPY_BANDS, window=win).astype("float32")
                   if self.variant.canopy else
                   np.zeros((0, self.body_crop, self.body_crop), dtype="float32"))
-
-        # build.py writes 0 for nodata; the model's contract is NaN, and its
-        # centring step then excludes those pixels from the tile mean.
-        valid = z != 0.0
         y, w = lab[0:1], lab[1:2]
 
         if self.augment:
@@ -452,16 +488,19 @@ class TileDataset(Dataset):
                 canopy = np.zeros_like(canopy)
 
         # Reduce to each consumer's resolution: elevation to the variant's,
-        # labels and weight to the body's.
-        zk, lk = self.z_scale, self.label_scale
+        # labels and weight to the body's. A published DEM is already at body
+        # resolution, so its elevation and validity need no reduction.
+        zk = 1 if tile["dem"] else self.z_scale
+        vk = 1 if tile["dem"] else lk
         z = np.where(valid, z, np.nan)
         z = block_nanmean(z, zk)[None] if zk > 1 else z[None]
-        canopy = block_mean(canopy, zk) if zk > 1 and canopy.size else canopy
+        ck = self.z_scale
+        canopy = block_mean(canopy, ck) if ck > 1 and canopy.size else canopy
 
         y = block_max(y, lk)
         w = block_mean(w, lk)
         # A body pixel is trainable only if it was fully covered by real ground.
-        w = w * (block_mean(valid.astype("float32"), lk) > 0.999)
+        w = w * (block_mean(valid.astype("float32"), vk) > 0.999)
 
         if self.augment and self.jitter_m:
             # Shift the labels bodily against the terrain. Most Sierra trail
@@ -488,16 +527,27 @@ def full_tile(d: Path, variant: var_mod.Variant,
     zk = int(round(variant.res / native_res))
     lk = int(round(var_mod.BODY_RES / native_res))
 
-    with rasterio.open(d / "dtm_clean.tif") as s:
-        z = s.read(1).astype("float32")
-    valid = z != 0.0
-    z = np.where(valid, z, np.nan)
-    z = block_nanmean(z, zk)[None] if zk > 1 else z[None]
+    published = (abs(variant.res - var_mod.BODY_RES) < 1e-9
+                 and (d / DEM_1M).exists())
+    if published:
+        with rasterio.open(d / DEM_1M) as s:
+            z = s.read(1).astype("float32")
+        valid = np.isfinite(z) & (z != 0.0)
+        z = np.where(valid, z, np.nan)[None]
+        vk, zk = 1, 1
+    else:
+        with rasterio.open(d / "dtm_clean.tif") as s:
+            z = s.read(1).astype("float32")
+        valid = z != 0.0
+        z = np.where(valid, z, np.nan)
+        z = block_nanmean(z, zk)[None] if zk > 1 else z[None]
+        vk = lk
 
+    ck = int(round(variant.res / native_res))
     if variant.canopy:
         with rasterio.open(d / "features.tif") as s:
             canopy = s.read(CANOPY_BANDS).astype("float32")
-        canopy = block_mean(canopy, zk) if zk > 1 else canopy
+        canopy = block_mean(canopy, ck) if ck > 1 else canopy
     else:
         canopy = np.zeros((0,) + z.shape[-2:], dtype="float32")
 
@@ -505,5 +555,8 @@ def full_tile(d: Path, variant: var_mod.Variant,
         lab = s.read().astype("float32")
     y = block_max(lab[0:1], lk)
     w = block_mean(lab[1:2], lk)
-    w = w * (block_mean(valid.astype("float32"), lk) > 0.999)
-    return z, canopy, y, w
+    w = w * (block_mean(valid.astype("float32"), vk) > 0.999)
+    n0 = min(z.shape[-2], y.shape[-2])
+    n1 = min(z.shape[-1], y.shape[-1])
+    return (z[..., :n0, :n1], canopy[..., :n0, :n1],
+            y[..., :n0, :n1], w[..., :n0, :n1])
