@@ -173,3 +173,7 @@ data/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# JOSM plugin build output
+plugin/target/
+plugin/dependency-reduced-pom.xml

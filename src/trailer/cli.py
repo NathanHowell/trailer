@@ -223,6 +223,14 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_golden(args) -> int:
+    from . import golden
+
+    out = golden.write(Path(args.out))
+    print(f"wrote {out}")
+    return 0
+
+
 def cmd_export(args) -> int:
     import json as _json
     from . import model as model_mod
@@ -394,6 +402,12 @@ def main(argv=None) -> int:
     ex.add_argument("--window", type=int, default=256,
                     help="fixed body window in pixels; must be divisible by 32")
     ex.set_defaults(fn=cmd_export)
+
+    g = sub.add_parser("golden", parents=[common],
+                       help="regenerate the JOSM plugin's tiler test fixtures")
+    g.add_argument("--out", default=str(Path("plugin/src/test/resources/golden.json")),
+                   help="where to write the fixture JSON")
+    g.set_defaults(fn=cmd_golden)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

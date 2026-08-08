@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.github.nathanhowell</groupId>
+    <artifactId>trailer</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <name>trailer</name>
+    <description>Trail probability overlay for JOSM, from LiDAR bare-earth elevation</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <kotlin.code.style>official</kotlin.code.style>
+        <kotlin.version>2.2.0</kotlin.version>
+        <!-- JDK 26 no longer accepts source/target below 17; JOSM needs 21. -->
+        <maven.compiler.release>21</maven.compiler.release>
+        <kotlin.compiler.jvmTarget>21</kotlin.compiler.jvmTarget>
+        <josm.version>19423</josm.version>
+        <onnxruntime.version>1.20.0</onnxruntime.version>
+        <!-- Set true to build without a Python toolchain; the fixtures are committed. -->
+        <golden.skip>false</golden.skip>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>mavenCentral</id>
+            <url>https://repo1.maven.org/maven2/</url>
+        </repository>
+        <repository>
+            <id>josm-releases</id>
+            <url>https://josm.openstreetmap.de/repository/releases/</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-stdlib-jdk8</artifactId>
+            <version>${kotlin.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.openstreetmap.josm</groupId>
+            <artifactId>josm</artifactId>
+            <version>${josm.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.15.2</version>
+        </dependency>
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>${onnxruntime.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-test-junit5</artifactId>
+            <version>${kotlin.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <sourceDirectory>src/main/kotlin</sourceDirectory>
+        <testSourceDirectory>src/test/kotlin</testSourceDirectory>
+        <plugins>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <version>${kotlin.version}</version>
+                <executions>
+                    <execution>
+                        <id>compile</id>
+                        <phase>compile</phase>
+                        <goals><goal>compile</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>test-compile</id>
+                        <phase>test-compile</phase>
+                        <goals><goal>test-compile</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+              Regenerate the tiler's golden fixtures from the Python
+              implementation before tests run. The Kotlin tiler is a second
+              implementation of trailer.infer's windowing, and a second
+              implementation of anything is where train/serve skew lives; if the
+              Python changes and nobody regenerates, the parity test would keep
+              passing against stale expectations. The output is committed too, so
+              -Dgolden.skip=true still builds on a machine without Python.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>golden-fixtures</id>
+                        <phase>generate-test-resources</phase>
+                        <goals><goal>exec</goal></goals>
+                        <configuration>
+                            <skip>${golden.skip}</skip>
+                            <executable>uv</executable>
+                            <workingDirectory>${project.basedir}/..</workingDirectory>
+                            <arguments>
+                                <argument>run</argument>
+                                <argument>trailer</argument>
+                                <argument>golden</argument>
+                                <argument>--out</argument>
+                                <argument>${project.basedir}/src/test/resources/golden.json</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.3</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <Plugin-Class>com.github.nathanhowell.trailer.TrailerPlugin</Plugin-Class>
+                            <Plugin-Description>Trail probability overlay from LiDAR bare-earth elevation</Plugin-Description>
+                            <Plugin-Version>1</Plugin-Version>
+                            <Plugin-Mainversion>${josm.version}</Plugin-Mainversion>
+                            <Plugin-Canloadatruntime>true</Plugin-Canloadatruntime>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <!--
+                              minimizeJar is OFF, unlike josm-elev. ONNX Runtime
+                              reaches its classes through JNI and ships native
+                              libraries as resources, neither of which the
+                              minimiser's static reachability analysis can see;
+                              it happily strips both.
+                            -->
+                            <minimizeJar>false</minimizeJar>
+                            <relocations>
+                                <!--
+                                  JOSM shares a classpath across plugins, so
+                                  Kotlin's stdlib and Jackson must be relocated
+                                  or they clash with whatever another plugin
+                                  bundled.
+
+                                  ai.onnxruntime is deliberately NOT relocated.
+                                  JNI symbol names encode the fully-qualified
+                                  Java class name (Java_ai_onnxruntime_...), so
+                                  renaming the package breaks the link to the
+                                  native library, and it fails at inference
+                                  time, not at build or load time.
+                                -->
+                                <relocation>
+                                    <pattern>com.fasterxml.jackson</pattern>
+                                    <shadedPattern>com.github.nathanhowell.trailer.shaded.jackson</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>org.jetbrains</pattern>
+                                    <shadedPattern>com.github.nathanhowell.trailer.shaded.org.jetbrains</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>kotlin</pattern>
+                                    <shadedPattern>com.github.nathanhowell.trailer.shaded.kotlin</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
