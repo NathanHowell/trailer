@@ -223,6 +223,33 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_dem(args) -> int:
+    from . import dem as dem_mod
+
+    root = Path(args.root)
+    dirs = [root / a.slug for a in select(args.aoi, args.role)]
+    dirs = [d for d in dirs if (d / "dtm_clean.tif").exists()]
+    if not dirs:
+        print("no built tiles with a DTM yet", file=sys.stderr)
+        return 1
+    logging.info("fetching published 1 m DEM for %d tiles", len(dirs))
+    recs = dem_mod.build_all(dirs, force=args.force)
+    (root / "dem.json").write_text(json.dumps(recs, indent=1))
+
+    bad = [r for r in recs if "error" in r]
+    ok = [r for r in recs if "error" not in r and not r.get("skipped")]
+    skipped = [r for r in recs if r.get("skipped")]
+    print(f"fetched {len(ok)}, skipped {len(skipped)}, failed {len(bad)}")
+    if ok:
+        import statistics
+        c = [r["slope_corr"] for r in ok]
+        print(f"  slope correlation vs our DTM: min {min(c):.3f} "
+              f"median {statistics.median(c):.3f} max {max(c):.3f}")
+    for r in bad:
+        print(f"  FAIL {r['key']}: {r['error']}", file=sys.stderr)
+    return 1 if bad else 0
+
+
 def cmd_golden(args) -> int:
     from . import golden
 
@@ -408,6 +435,12 @@ def main(argv=None) -> int:
     g.add_argument("--out", default=str(Path("plugin/src/test/resources/golden.json")),
                    help="where to write the fixture JSON")
     g.set_defaults(fn=cmd_golden)
+
+    dm = sub.add_parser("dem", parents=[common],
+                        help="fetch the published USGS 3DEP 1 m DEM per tile")
+    dm.add_argument("--force", action="store_true",
+                    help="refetch tiles that already have dem1m.tif")
+    dm.set_defaults(fn=cmd_dem)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
