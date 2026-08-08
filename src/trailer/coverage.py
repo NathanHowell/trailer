@@ -14,6 +14,8 @@ from pathlib import Path
 import requests
 from shapely.geometry import Point, shape
 
+from . import atomic
+
 log = logging.getLogger(__name__)
 
 RESOURCES_URL = "https://usgs.entwine.io/boundaries/resources.geojson"
@@ -29,11 +31,13 @@ def fetch_index(cache_dir: Path, refresh: bool = False) -> dict:
     path = resources_path(cache_dir)
     if path.exists() and not refresh:
         return json.loads(path.read_text())
-    path.parent.mkdir(parents=True, exist_ok=True)
     log.info("fetching 3DEP coverage index ...")
     r = requests.get(RESOURCES_URL, timeout=300)
     r.raise_for_status()
-    path.write_text(r.text)
+    # Staged for the same reason as the OSM cache: the branch above trusts this
+    # file's existence, and a write cut short by a full disk would be read back
+    # as the coverage index.
+    atomic.write_text(path, r.text)
     return r.json()
 
 

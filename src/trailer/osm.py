@@ -20,6 +20,8 @@ from pathlib import Path
 
 import requests
 
+from . import atomic
+
 log = logging.getLogger(__name__)
 
 ENDPOINTS = (
@@ -104,8 +106,12 @@ def fetch(south: float, west: float, north: float, east: float,
 
     data = _request(build_query(south, west, north, east), attempts)
     if cache_path:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(data))
+        # Staged: an interrupted write here leaves a half-JSON file that the
+        # branch above would hand straight back on the next run. That one fails
+        # loudly rather than silently -- unlike a truncated LAZ -- but it is a
+        # cache nothing cleans up, so a tile stays broken until someone deletes
+        # the file by hand.
+        atomic.write_text(cache_path, json.dumps(data))
     return data
 
 

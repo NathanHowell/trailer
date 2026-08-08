@@ -32,6 +32,28 @@ def aoi_bbox(aoi: Aoi, epsg: str, pad_m: float = 80.0) -> tuple[float, float, fl
     return min(lats), min(lons), max(lats), max(lons)
 
 
+def check_complete(laz_path: Path, declared: int, decoded: int) -> None:
+    """Refuse a cloud that decoded fewer points than its header promises.
+
+    The atomic write in ``rasters.extract_points`` stops a *partial* file ever
+    appearing under the real name, which covers the interrupted download. It
+    does not cover the case this bug was actually opened for: PDAL exited
+    successfully and the file was still short, so whatever went wrong was never
+    detected where it happened. That failure could in principle produce a
+    short-but-readable cloud, which nothing else here would catch -- the header
+    is self-consistent, laspy reads it without complaint, and the tile builds
+    from a fraction of its ground returns.
+
+    Free to check, because the caller has just decoded every point anyway.
+    """
+    if declared != decoded:
+        raise ValueError(
+            f"{laz_path.name} is truncated: its header declares {declared:,} "
+            f"points but only {decoded:,} decoded. Delete it and re-extract; "
+            f"a tile built from part of its ground returns is a wrong model, "
+            f"not a failed build")
+
+
 def point_stats(laz_path: Path, size_m: int) -> dict:
     """Density and classification summary, read in chunks.
 
@@ -42,6 +64,7 @@ def point_stats(laz_path: Path, size_m: int) -> dict:
     n_ground = 0
     ground_z: list[np.ndarray] = []
     with laspy.open(str(laz_path)) as fh:
+        declared = int(fh.header.point_count)
         for chunk in fh.chunk_iterator(5_000_000):
             cls = np.asarray(chunk.classification)
             total += len(cls)
@@ -51,6 +74,10 @@ def point_stats(laz_path: Path, size_m: int) -> dict:
                 # subsample; the median is stable and this bounds memory
                 z = np.asarray(chunk.z)[g]
                 ground_z.append(z[::20] if len(z) > 200_000 else z)
+    # Before the ground-density check, not after: a truncated file also looks
+    # like a data hole, and "likely a data hole" would send someone looking at
+    # the survey instead of at the file.
+    check_complete(laz_path, declared, total)
     if n_ground < 100:
         raise ValueError(f"only {n_ground} ground points -- likely a data hole")
     zg = np.concatenate(ground_z)

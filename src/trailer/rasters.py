@@ -27,6 +27,8 @@ from pyproj import Transformer
 from rasterio.crs import CRS
 from scipy.ndimage import median_filter, uniform_filter
 
+from . import atomic
+
 log = logging.getLogger(__name__)
 
 NODATA = 0.0
@@ -63,16 +65,21 @@ def extract_points(ept_url: str, lat: float, lon: float, size_m: int,
     wx = [c[0] for c in corners]
     wy = [c[1] for c in corners]
 
-    out_laz.parent.mkdir(parents=True, exist_ok=True)
-    run_pdal([
-        {"type": "readers.ept", "filename": ept_url,
-         "bounds": f"([{min(wx):.1f},{max(wx):.1f}],[{min(wy):.1f},{max(wy):.1f}])"},
-        {"type": "filters.reprojection", "out_srs": epsg},
-        {"type": "filters.crop",
-         "bounds": f"([{x-half},{x+half}],[{y-half},{y+half}])"},
-        {"type": "writers.las", "filename": str(out_laz),
-         "compression": "laszip", "a_srs": epsg},
-    ], out_laz.parent, out_laz.stem)
+    # Staged, because ``build_aoi`` reuses ``points.laz`` whenever it exists and
+    # a truncated LAZ is not obviously broken -- its header still advertises the
+    # full point count, so laspy opens it happily and only fails partway through
+    # reading. Observed once already: h_362193_s1186299, 508 MB on disk, header
+    # claiming 81,423,483 points, unreadable. See `atomic`.
+    with atomic.staged(out_laz) as tmp:
+        run_pdal([
+            {"type": "readers.ept", "filename": ept_url,
+             "bounds": f"([{min(wx):.1f},{max(wx):.1f}],[{min(wy):.1f},{max(wy):.1f}])"},
+            {"type": "filters.reprojection", "out_srs": epsg},
+            {"type": "filters.crop",
+             "bounds": f"([{x-half},{x+half}],[{y-half},{y+half}])"},
+            {"type": "writers.las", "filename": str(tmp),
+             "compression": "laszip", "a_srs": epsg},
+        ], out_laz.parent, out_laz.stem)
     return epsg
 
 
