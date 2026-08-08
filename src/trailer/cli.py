@@ -313,7 +313,7 @@ def cmd_export(args) -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     info = model_mod.export_onnx(net, args.variant, out, size=args.window,
-                                 overlap=args.overlap)
+                                 overlap=args.overlap, tta=args.tta)
     info |= {"checkpoint": str(args.checkpoint), "trained_variants": meta["variants"]}
     (out.with_suffix(".json")).write_text(_json.dumps(info, indent=1))
     size_mb = out.stat().st_size / 1e6
@@ -490,6 +490,9 @@ def main(argv=None) -> int:
                     help="fixed body window in pixels; must be divisible by 32")
     ex.add_argument("--overlap", type=float, default=0.5,
                     help="window overlap the sidecar will tell the plugin to use")
+    ex.add_argument("--tta", action="store_true",
+                   help="bake the 8-fold D4 average into the graph: better, at "
+                        "8x inference cost, and not switchable afterwards")
     ex.set_defaults(fn=cmd_export)
 
     g = sub.add_parser("golden", parents=[common],

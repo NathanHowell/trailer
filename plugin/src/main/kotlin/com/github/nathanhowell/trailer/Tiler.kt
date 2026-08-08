@@ -1,7 +1,5 @@
 package com.github.nathanhowell.trailer
 
-import kotlin.math.PI
-import kotlin.math.cos
 import kotlin.math.max
 
 /**
@@ -24,29 +22,14 @@ import kotlin.math.max
  */
 object Tiler {
 
-    /**
-     * Separable 2-D Hann taper, flattened row-major.
-     *
-     * Matches `torch.hann_window(size + 2, periodic=False)[1:-1]` outer-multiplied
-     * with itself and floored at 1e-3. The `size + 2` then trim is not incidental:
-     * a plain Hann window is exactly zero at both ends, so the outermost row and
-     * column of every tile would contribute nothing and the floor would be doing
-     * all the work there. Trimming the zero endpoints keeps the taper strictly
-     * positive across the whole window.
-     */
-    fun hann2d(size: Int): FloatArray {
-        require(size > 0) { "window size must be positive, got $size" }
-        val w = DoubleArray(size) { i ->
-            0.5 - 0.5 * cos(2.0 * PI * (i + 1) / (size + 1))
-        }
-        val out = FloatArray(size * size)
-        for (r in 0 until size) {
-            for (c in 0 until size) {
-                out[r * size + c] = max(w[r] * w[c], 1e-3).toFloat()
-            }
-        }
-        return out
-    }
+    // There is deliberately no `hann2d` here either. The taper arrives as the
+    // model's second output, `window_taper`, computed by the same `infer.hann2d`
+    // that trained and validated the weights. Its definition has a detail that
+    // exists precisely because it is not obvious — `hann_window(size + 2)` with
+    // the ends trimmed, since a plain Hann is exactly zero at both ends and the
+    // outermost row and column of every tile would otherwise contribute nothing.
+    // A reimplementation that misses that is wrong only along tile edges, which
+    // is exactly where seams live and where nobody looks.
 
     // There is deliberately no `step(tile, overlap)` here. The step depends on
     // the stem's stride as well as the overlap, and an origin that is not a
@@ -120,10 +103,17 @@ object Tiler {
      * `row / stride` in the output. For the deployable bare-earth variant stride
      * is 1, but the division is kept explicit rather than assumed away.
      */
-    class Blender(private val height: Int, private val width: Int, private val tile: Int) {
+    class Blender(private val height: Int, private val width: Int,
+                  private val tile: Int, private val taper: FloatArray) {
         private val acc = FloatArray(height * width)
         private val den = FloatArray(height * width)
-        private val taper = hann2d(tile)
+
+        init {
+            require(taper.size == tile * tile) {
+                "taper is ${taper.size} values for a $tile x $tile window; it " +
+                    "should be the model's window_taper output"
+            }
+        }
 
         fun add(prob: FloatArray, row: Int, col: Int) {
             require(prob.size == tile * tile) {

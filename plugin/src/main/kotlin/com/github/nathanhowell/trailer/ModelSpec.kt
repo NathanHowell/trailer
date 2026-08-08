@@ -63,6 +63,18 @@ class ModelSpec(json: String) {
     /** Fraction of a window shared with its neighbour; informational. */
     val overlap: Double = required("overlap").asDouble()
 
+    /**
+     * Whether the 8-fold D4 average is baked into this graph.
+     *
+     * Baked, not switchable: ONNX cannot branch on it. Informational here — the
+     * caller runs the graph the same way either way — but worth surfacing,
+     * because it is the difference between one forward pass per window and eight.
+     */
+    val tta: Boolean = required("tta").asBoolean()
+
+    /** Output tensor names, in order. The taper is the second one. */
+    val outputs: List<String> = required("outputs").map { it.asText() }
+
     init {
         require(inputPx == outputPx * stride) {
             "sidecar is inconsistent: input_px $inputPx is not output_px " +
@@ -77,6 +89,10 @@ class ModelSpec(json: String) {
         }
         require(padMode == "reflect") {
             "this plugin only implements reflect padding, sidecar says '$padMode'"
+        }
+        require(outputs.size == 2 && outputs[1] == "window_taper") {
+            "expected the model to emit its own blending taper as a second " +
+                "output; this one emits $outputs"
         }
     }
 

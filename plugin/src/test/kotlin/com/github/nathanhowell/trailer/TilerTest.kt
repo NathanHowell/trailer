@@ -38,20 +38,16 @@ class TilerTest {
         }
     }
 
-    @Test
-    fun `hann taper matches torch`() {
-        val size = golden["hann_size"].intValue()
-        assertClose(golden["hann"].floats(), Tiler.hann2d(size), 1e-6f, "hann2d")
-    }
-
-    @Test
-    fun `hann taper is strictly positive`() {
-        // The +2-then-trim exists so the outer ring is not zero. If someone
-        // "simplifies" it to a plain Hann window, the edges die and this catches it.
-        val t = Tiler.hann2d(16)
-        assertTrue(t.all { it > 0f }) { "taper has non-positive entries" }
-        assertTrue(t.min() >= 1e-3f) { "taper floor not applied" }
-    }
+    /**
+     * The taper Python produced, used here exactly as the model emits it at
+     * runtime as `window_taper`.
+     *
+     * There is no longer a Kotlin `hann2d` to compare against. That is the point:
+     * the tests that used to check one against the other have been replaced by
+     * there being only one, and the blend below is verified against Python's
+     * taper rather than against a Kotlin copy of it.
+     */
+    private fun goldenTaper(): FloatArray = golden["hann"].floats()
 
     @Test
     fun `padding and origins match python`() {
@@ -89,7 +85,8 @@ class TilerTest {
     fun `blended output matches python`() {
         val b = golden["blend"]
         val tile = b["tile"].intValue()
-        val blender = Tiler.Blender(b["h"].intValue(), b["w"].intValue(), tile)
+        val blender = Tiler.Blender(b["h"].intValue(), b["w"].intValue(), tile,
+                                    goldenTaper())
         for (i in 0 until b["windows"].size()) {
             val w = b["windows"][i]
             blender.add(b["probs"][i].floats(), w["row"].intValue(), w["col"].intValue())
@@ -118,7 +115,7 @@ class TilerTest {
         val step = 4
         val h = 24
         val w = 24
-        val blender = Tiler.Blender(h, w, tile)
+        val blender = Tiler.Blender(h, w, tile, goldenTaper())
         val flat = FloatArray(tile * tile) { 0.375f }
         for (win in Tiler.windows(h, w, tile, step)) blender.add(flat, win.row, win.col)
         val out = blender.result()

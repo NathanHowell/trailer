@@ -22,14 +22,33 @@ def hann2d(size: int, device, dtype=torch.float32) -> torch.Tensor:
     return (w[:, None] * w[None, :]).clamp_min(1e-3)
 
 
+def _rot90(x: torch.Tensor, k: int) -> torch.Tensor:
+    """``torch.rot90(x, k, dims=(-2, -1))``, spelled in ops ONNX can export.
+
+    ``aten::rot90`` has no symbolic at opset 17, and the D4 average is baked into
+    the exported graph so the plugin never reimplements it. Transpose and flip
+    both export, so the rotation is written out in terms of them. Equality with
+    ``torch.rot90`` is asserted in the tests rather than argued for here — the
+    two spellings are easy to get right for k=2 and subtly wrong for k=1 and 3.
+    """
+    k %= 4
+    if k == 0:
+        return x
+    if k == 1:
+        return torch.flip(x.transpose(-2, -1), dims=(-2,))
+    if k == 2:
+        return torch.flip(x, dims=(-2, -1))
+    return torch.flip(x.transpose(-2, -1), dims=(-1,))
+
+
 def _d4(x: torch.Tensor, k: int, flip: bool) -> torch.Tensor:
     if flip:
         x = torch.flip(x, dims=(-1,))
-    return torch.rot90(x, k, dims=(-2, -1))
+    return _rot90(x, k)
 
 
 def _d4_inv(x: torch.Tensor, k: int, flip: bool) -> torch.Tensor:
-    x = torch.rot90(x, -k, dims=(-2, -1))
+    x = _rot90(x, -k)
     return torch.flip(x, dims=(-1,)) if flip else x
 
 

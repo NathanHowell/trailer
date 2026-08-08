@@ -188,22 +188,60 @@ class Deployable(nn.Module):
     probability map, with the median filters, variance windows and clip
     constants sealed inside the file. Nothing to reimplement in Java, nothing to
     drift out of sync with the weights.
+
+    Two more things are sealed in here for the same reason.
+
+    **The D4 average.** Terrain has no canonical orientation, so averaging the
+    eight dihedral transforms is nearly free accuracy at eight times the compute.
+    Done in the graph, it is never written in Kotlin at all -- and the piece most
+    likely to be written wrong is the *inverse* transform, whose failure mode is
+    a subtly blurred output that looks like an unlucky model rather than a bug.
+
+    **The window taper.** Emitted as a second output rather than recomputed by
+    the caller. Its definition has a detail that exists precisely because it is
+    not obvious -- ``hann_window(size + 2)`` with the ends trimmed, because a
+    plain Hann is exactly zero at both ends and the outermost row and column of
+    every tile would contribute nothing. A reimplementation that misses it is
+    wrong only along tile edges, which is where seams live and where nobody
+    looks.
     """
 
-    def __init__(self, net: MultiStemNet, variant: str):
+    def __init__(self, net: MultiStemNet, variant: str, tta: bool = False):
         super().__init__()
         if variant not in net.stems:
             raise ValueError(f"checkpoint has no {variant!r} stem; it has "
                              f"{', '.join(net.stems)}")
         self.stem = net.stems[variant]
         self.body = net.body
+        self.tta = tta
+
+    def _once(self, z):
+        return torch.sigmoid(self.body(self.stem(z)))
 
     def forward(self, z):
-        return torch.sigmoid(self.body(self.stem(z)))
+        from . import infer
+
+        if self.tta:
+            acc = None
+            for flip in (False, True):
+                for k in range(4):
+                    out = infer._d4_inv(self._once(infer._d4(z, k, flip)), k, flip)
+                    acc = out if acc is None else acc + out
+            p = acc / 8.0
+        else:
+            p = self._once(z)
+
+        # Sized from the output, not from a constant, so it stays correct if the
+        # export window changes. Built here rather than as a buffer so it lands
+        # in the graph as an initializer of the right shape.
+        taper = infer.hann2d(p.shape[-1], p.device, p.dtype)
+        # Broadcast against p so the exporter cannot prune an output that does
+        # not depend on the input.
+        return p, taper.expand_as(p)
 
 
 def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256,
-                overlap: float = 0.5) -> dict:
+                overlap: float = 0.5, tta: bool = False) -> dict:
     """Freeze one variant to ONNX. Canopy variants are not deployable this way.
 
     The window is fixed rather than dynamic. That is a real constraint of the
@@ -227,14 +265,15 @@ def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256,
                          "variant such as 'dem1'")
     if size % 32:
         raise ValueError(f"body window {size} must be divisible by 32")
-    model = Deployable(net, variant).eval()
+    model = Deployable(net, variant, tta=tta).eval()
     n = v.crop_px(size)
     # The TorchScript exporter, not dynamo: dynamo currently fails to translate
     # the stems' BatchNorm (_native_batch_norm_legit_no_training). It handles
     # the im2col median fine, which was the op in doubt.
     torch.onnx.export(model, (torch.zeros(1, 1, n, n),), str(path),
                       input_names=["elevation_m"],
-                      output_names=["trail_probability"], opset_version=17)
+                      output_names=["trail_probability", "window_taper"],
+                      opset_version=17)
     return {
         "variant": variant,
         "res_m": v.res,
@@ -246,9 +285,16 @@ def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256,
         "overlap": overlap,
         "step_px": infer.window_step(n, overlap, v.stride),
         "pad_mode": "reflect",
+        # Baked into the graph at export time, not switchable at runtime: ONNX
+        # cannot branch on it, and shipping both graphs would double what a
+        # mapper downloads for an 8x-compute option most will leave alone.
+        "tta": tta,
+        "outputs": ["trail_probability", "window_taper"],
         "input": "single-band float32 bare-earth elevation in metres, "
                  "NaN for nodata",
         "output": f"trail probability at {var_mod.BODY_RES:g} m",
+        "taper": "window_taper is the blending weight for this window; "
+                 "accumulate probability*taper and taper, then divide",
     }
 
 

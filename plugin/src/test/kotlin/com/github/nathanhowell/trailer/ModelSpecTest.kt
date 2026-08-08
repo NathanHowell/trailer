@@ -28,6 +28,35 @@ class ModelSpecTest {
         assertEquals(1, dem1.stride)
         assertEquals(128, dem1.stepPx)
         assertEquals("reflect", dem1.padMode)
+        assertEquals(false, dem1.tta)
+        assertEquals(listOf("trail_probability", "window_taper"), dem1.outputs)
+    }
+
+    @Test
+    fun `reads the sidecar of a graph with the D4 average baked in`() {
+        // Same export, --tta. Everything about tiling is identical; the only
+        // difference is that each window costs eight forward passes instead of
+        // one, which the caller cannot choose at runtime because ONNX cannot
+        // branch on it.
+        val tta = ModelSpec(fixture("model-dem1-tta.json"))
+        assertEquals(true, tta.tta)
+        assertEquals(dem1.stepPx, tta.stepPx)
+        assertEquals(dem1.inputPx, tta.inputPx)
+    }
+
+    @Test
+    fun `refuses a model that does not emit its own taper`() {
+        // The taper is the model's second output precisely so that nothing here
+        // recomputes it. A graph without one would mean someone had to.
+        val e = assertFailsWith<IllegalArgumentException> {
+            ModelSpec("""
+                {"variant":"old","res_m":1.0,"out_res_m":1.0,
+                 "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
+                 "step_px":128,"pad_mode":"reflect","tta":false,
+                 "outputs":["trail_probability"]}
+            """.trimIndent())
+        }
+        assertTrue(e.message!!.contains("taper"), e.message!!)
     }
 
     @Test
@@ -40,7 +69,8 @@ class ModelSpecTest {
         val strideTwo = ModelSpec("""
             {"variant":"future05","res_m":0.5,"out_res_m":1.0,
              "input_px":512,"output_px":256,"stride":2,"overlap":0.7,
-             "step_px":152,"pad_mode":"reflect"}
+             "step_px":152,"pad_mode":"reflect","tta":false,
+             "outputs":["trail_probability","window_taper"]}
         """.trimIndent())
         assertEquals(152, strideTwo.stepPx, "the number Python computed, unmodified")
         assertEquals(76, strideTwo.bodyStepPx, "step in output pixels")
@@ -60,7 +90,8 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":0.5,"out_res_m":1.0,
                  "input_px":500,"output_px":256,"stride":2,"overlap":0.5,
-                 "step_px":250,"pad_mode":"reflect"}
+                 "step_px":250,"pad_mode":"reflect","tta":false,
+                 "outputs":["trail_probability","window_taper"]}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("input_px"), e.message!!)
@@ -75,7 +106,8 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":0.5,"out_res_m":1.0,
                  "input_px":512,"output_px":256,"stride":2,"overlap":0.7,
-                 "step_px":153,"pad_mode":"reflect"}
+                 "step_px":153,"pad_mode":"reflect","tta":false,
+                 "outputs":["trail_probability","window_taper"]}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("multiple of stride"), e.message!!)
@@ -87,7 +119,8 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
-                 "step_px":128,"pad_mode":"replicate"}
+                 "step_px":128,"pad_mode":"replicate","tta":false,
+                 "outputs":["trail_probability","window_taper"]}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("replicate"), e.message!!)
@@ -111,7 +144,8 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":1.0,
-                 "step_px":0,"pad_mode":"reflect"}
+                 "step_px":0,"pad_mode":"reflect","tta":false,
+                 "outputs":["trail_probability","window_taper"]}
             """.trimIndent())
         }
     }
