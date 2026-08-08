@@ -49,6 +49,22 @@ def _param_groups(net, lr: float):
     return [{"params": enc, "lr": lr * 0.1}, {"params": dec, "lr": lr}]
 
 
+def estimate_prior(dataset, n: int = 256) -> float:
+    """Positive rate the loss actually sees, over unignored pixels.
+
+    Measured from sampled crops rather than from the tiles: positive-biased
+    sampling lifts a 0.55-2.5% tile rate to ~3%, and it is the sampled rate that
+    the output bias and pos_weight have to match.
+    """
+    pos = tot = 0
+    for i in range(min(n, len(dataset))):
+        _, y, w = dataset[i]
+        m = w > 0
+        pos += int((y[m] > 0).sum())
+        tot += int(m.sum())
+    return pos / max(tot, 1)
+
+
 def _ramp(epoch: int, warmup: int, span: int = 3) -> float:
     """clDice weight schedule: off, then linear in."""
     if epoch < warmup:
@@ -101,6 +117,10 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
     loader, val_loader = _loaders(train_dirs, cfg)
     net = model_mod.build_model(cfg.arch, cfg.encoder,
                                 pretrained=not cfg.no_pretrained).to(device)
+    prior = estimate_prior(loader.dataset)
+    model_mod.set_output_prior(net, prior, cfg.pos_weight)
+    log.info("effective neg:pos after sampling and pos_weight: %.1f:1",
+             (1 - prior) / max(prior * cfg.pos_weight, 1e-9))
     criterion = TrailLoss(cldice_w=cfg.cldice, pos_weight=cfg.pos_weight)
     opt = torch.optim.AdamW(_param_groups(net, cfg.lr), weight_decay=1e-4)
 
@@ -116,6 +136,7 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
     outdir.mkdir(parents=True, exist_ok=True)
     meta = {"arch": cfg.arch, "encoder": cfg.encoder,
             "in_channels": 6, "crop": cfg.crop, "res": cfg.res,
+            "prior": round(prior, 5),
             "tiles": [d.name for d in train_dirs]}
 
     best = -1.0

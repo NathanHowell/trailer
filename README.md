@@ -130,6 +130,16 @@ Three loss terms, each covering what the others miss:
 | Tversky (α=0.3, β=0.7) | region overlap, false negatives penalised harder |
 | clDice | topology — Dice barely notices a one-pixel gap in a 1 m trail, but that gap is what makes a proposal unusable |
 
+**Imbalance** is handled by sampling and loss, not by the optimizer — AdamW
+already rescales the small sparse gradients a rare class produces. Trails are
+0.55–2.5% of pixels depending on the tile; positive-biased sampling lifts that
+to ~3.1% and, more usefully, equalises it across tiles so a label-sparse tile
+still contributes a full share of signal per batch. `pos_weight=8` then brings
+the effective ratio to about 3.9:1. The output conv's bias is initialised to the
+weighted base rate, so the model starts at the prior instead of predicting
+p=0.5 everywhere and spending its opening steps unlearning that — measured, it
+cuts step-0 BCE by 43%.
+
 Recall is deliberately bought at the cost of precision. A reviewer in JOSM
 dismisses a false positive in a second; a trail never drawn is invisible to
 them. clDice is ramped in after a few epochs, since skeletonising random early

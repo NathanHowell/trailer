@@ -17,6 +17,7 @@ hundred metres, which is the point of using it.
 from __future__ import annotations
 
 import logging
+import math
 
 import torch
 import torch.nn as nn
@@ -53,6 +54,37 @@ def build_model(arch: str = "unet", encoder: str = DEFAULT_ENCODER,
     log.info("%s/%s: %.1fM params, %d input bands", arch, encoder, n / 1e6,
              in_channels)
     return model
+
+
+def set_output_prior(model: nn.Module, prior: float,
+                     pos_weight: float = 1.0) -> float:
+    """Bias the output layer towards the base rate (Lin et al. 2017, sec. 3.3).
+
+    A zero bias makes the untrained model predict p=0.5 everywhere -- "half of
+    this mountain is trail" -- and the opening steps are spent driving that down
+    against gradients dominated by background. Starting at the base rate skips
+    that entirely.
+
+    The target is the *weighted* prior, since ``pos_weight`` shifts where the
+    BCE optimum sits. Minimising ``-[w*pi*log p + (1-pi)*log(1-p)]`` over a
+    constant p gives ``p* = w*pi / (w*pi + 1 - pi)``.
+
+    Returns the bias applied, for logging.
+    """
+    prior = min(max(prior, 1e-6), 1 - 1e-6)
+    p = pos_weight * prior / (pos_weight * prior + 1 - prior)
+    bias = math.log(p / (1 - p))
+
+    head = getattr(model, "segmentation_head", None)
+    convs = [m for m in (head.modules() if head is not None else model.modules())
+             if isinstance(m, nn.Conv2d) and m.bias is not None]
+    if not convs:
+        raise ValueError("no biased output conv found; cannot set prior")
+    nn.init.constant_(convs[-1].bias, bias)
+
+    log.info("output prior: %.3f%% positive, pos_weight %.1f -> p0 %.3f "
+             "(bias %.2f)", 100 * prior, pos_weight, p, bias)
+    return bias
 
 
 def pick_device(requested: str | None = None) -> torch.device:
