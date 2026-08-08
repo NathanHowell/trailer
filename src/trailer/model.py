@@ -22,16 +22,105 @@ import math
 import torch
 import torch.nn as nn
 
-from .rasters import BAND_NAMES
+import torch.nn.functional as F
+
+from . import variants as var_mod
+from .preprocess import Background, FineDerivatives, centre
 
 log = logging.getLogger(__name__)
 
 DEFAULT_ENCODER = "resnet34"
 
+#: Channels a stem hands the shared trunk. Wide enough that a stride-2 stem can
+#: encode what it saw at 0.5 m before decimating, which is the whole reason the
+#: sub-metre path exists.
+STEM_CHANNELS = 32
+
+
+class Stem(nn.Module):
+    """One input variant's adapter: raw elevation in, trunk features out.
+
+    Takes bare-earth elevation in metres (``NaN`` = nodata) at the variant's own
+    pixel size, derives the terrain bands there, and brings them to
+    ``BODY_RES``. For a 0.5 m variant the stride-2 convolution is doing the real
+    work: it can learn a matched filter across a 2-3 px tread and encode the
+    result, rather than mean-pooling the detail away before the trunk ever sees
+    it.
+
+    The 10 m band is computed after decimation, at body resolution, so it means
+    exactly the same thing whichever stem produced it.
+    """
+
+    def __init__(self, variant: var_mod.Variant, out_ch: int = STEM_CHANNELS,
+                 body_res: float = var_mod.BODY_RES):
+        super().__init__()
+        self.variant = variant
+        self.stride = variant.stride
+        self.fine = FineDerivatives(variant.res)
+        self.background = Background(body_res)
+
+        self.project = nn.Sequential(
+            nn.Conv2d(variant.fine_channels, out_ch, 7,
+                      stride=self.stride, padding=3, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+        self.fuse = nn.Sequential(
+            nn.Conv2d(out_ch + 1, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+
+    def forward(self, z, canopy=None):
+        z, mask = centre(z)
+        bands = self.fine(z) * mask.to(z.dtype)
+        if self.variant.canopy:
+            if canopy is None:
+                raise ValueError(f"variant {self.variant.key!r} needs canopy "
+                                 f"bands (chm, vdi)")
+            bands = torch.cat([bands, canopy], dim=1)
+        elif canopy is not None:
+            raise ValueError(f"variant {self.variant.key!r} takes no canopy "
+                             f"bands; it models a bare-earth DEM source")
+
+        fine = self.project(bands)
+        if self.stride > 1:
+            z = F.avg_pool2d(z, self.stride, self.stride)
+        coarse = self.background(z)
+        # Guard against an odd crop leaving the two paths a pixel apart.
+        if coarse.shape[-2:] != fine.shape[-2:]:
+            coarse = F.interpolate(coarse, size=fine.shape[-2:],
+                                   mode="bilinear", align_corners=False)
+        return self.fuse(torch.cat([fine, coarse], dim=1))
+
+
+class MultiStemNet(nn.Module):
+    """Per-variant stems feeding one shared trunk and head.
+
+    Binding several input resolutions to a single trunk is what makes one
+    checkpoint useful both in JOSM, against 1 m 3DEP, and against the 0.5 m
+    stacks we render ourselves. The alternative -- one model per source -- would
+    split an already small training set.
+    """
+
+    def __init__(self, body: nn.Module, stems: dict[str, Stem]):
+        super().__init__()
+        self.body = body
+        self.stems = nn.ModuleDict(stems)
+
+    @property
+    def segmentation_head(self):
+        # So set_output_prior finds the trunk's output conv rather than a stem's.
+        return self.body.segmentation_head
+
+    def forward(self, z, canopy=None, variant: str | None = None):
+        if variant is None:
+            if len(self.stems) != 1:
+                raise ValueError("variant is required when the model has more "
+                                 f"than one stem ({', '.join(self.stems)})")
+            variant = next(iter(self.stems))
+        return self.body(self.stems[variant](z, canopy))
+
 
 def build_model(arch: str = "unet", encoder: str = DEFAULT_ENCODER,
-                in_channels: int = len(BAND_NAMES),
-                pretrained: bool = True) -> nn.Module:
+                variants: list[var_mod.Variant] | None = None,
+                pretrained: bool = True) -> MultiStemNet:
     import segmentation_models_pytorch as smp
 
     factory = {
@@ -44,15 +133,19 @@ def build_model(arch: str = "unet", encoder: str = DEFAULT_ENCODER,
     if arch not in factory:
         raise ValueError(f"unknown arch {arch!r}; known: {', '.join(factory)}")
 
-    model = factory[arch](
+    variants = variants or [var_mod.get(k) for k in var_mod.DEFAULT_VARIANTS]
+    body = factory[arch](
         encoder_name=encoder,
         encoder_weights="imagenet" if pretrained else None,
-        in_channels=in_channels,
+        in_channels=STEM_CHANNELS,
         classes=1,
     )
+    model = MultiStemNet(body, {v.key: Stem(v) for v in variants})
     n = sum(p.numel() for p in model.parameters())
-    log.info("%s/%s: %.1fM params, %d input bands", arch, encoder, n / 1e6,
-             in_channels)
+    stem_n = sum(p.numel() for s in model.stems.values() for p in s.parameters())
+    log.info("%s/%s: %.1fM params (%.0fk in %d stems: %s)", arch, encoder,
+             n / 1e6, stem_n / 1e3, len(variants),
+             ", ".join(f"{v.key}@{v.res}m" for v in variants))
     return model
 
 
@@ -87,6 +180,61 @@ def set_output_prior(model: nn.Module, prior: float,
     return bias
 
 
+class Deployable(nn.Module):
+    """One variant, frozen, elevation in and probability out.
+
+    This is the whole point of deriving terrain in the graph: what crosses the
+    language boundary into the JOSM plugin is a float32 DEM tile and a
+    probability map, with the median filters, variance windows and clip
+    constants sealed inside the file. Nothing to reimplement in Java, nothing to
+    drift out of sync with the weights.
+    """
+
+    def __init__(self, net: MultiStemNet, variant: str):
+        super().__init__()
+        if variant not in net.stems:
+            raise ValueError(f"checkpoint has no {variant!r} stem; it has "
+                             f"{', '.join(net.stems)}")
+        self.stem = net.stems[variant]
+        self.body = net.body
+
+    def forward(self, z):
+        return torch.sigmoid(self.body(self.stem(z)))
+
+
+def export_onnx(net: MultiStemNet, variant: str, path, size: int = 384) -> dict:
+    """Freeze one variant to ONNX. Canopy variants are not deployable this way.
+
+    The window is fixed rather than dynamic. That is a real constraint of the
+    architecture, not an export limitation: a ResNet-34 U-Net needs its input
+    divisible by 32, and ``torch.export`` correctly refuses to promise arbitrary
+    H and W. It costs nothing, because the plugin has to tile with a Hann-
+    tapered overlapping window regardless -- the same thing ``infer.predict``
+    does -- so a fixed window is what it wants anyway.
+    """
+    v = var_mod.get(variant)
+    if v.canopy:
+        raise ValueError(f"{variant!r} needs canopy bands, which no raster "
+                         "elevation service provides; export a bare-earth "
+                         "variant such as 'dem1'")
+    if size % 32:
+        raise ValueError(f"body window {size} must be divisible by 32")
+    model = Deployable(net, variant).eval()
+    n = v.crop_px(size)
+    # The TorchScript exporter, not dynamo: dynamo currently fails to translate
+    # the stems' BatchNorm (_native_batch_norm_legit_no_training). It handles
+    # the im2col median fine, which was the op in doubt.
+    torch.onnx.export(model, (torch.zeros(1, 1, n, n),), str(path),
+                      input_names=["elevation_m"],
+                      output_names=["trail_probability"], opset_version=17)
+    return {"variant": variant, "res_m": v.res, "out_res_m": var_mod.BODY_RES,
+            "input_px": n, "output_px": size,
+            "input": "single-band float32 bare-earth elevation in metres, "
+                     "NaN for nodata",
+            "output": f"trail probability at {var_mod.BODY_RES:g} m",
+            "tiling": "overlap windows and blend; edges are untapered here"}
+
+
 def pick_device(requested: str | None = None) -> torch.device:
     if requested:
         return torch.device(requested)
@@ -101,11 +249,12 @@ def save(model: nn.Module, path, meta: dict) -> None:
     torch.save({"state_dict": model.state_dict(), "meta": meta}, path)
 
 
-def load(path, device: torch.device | None = None) -> tuple[nn.Module, dict]:
+def load(path, device: torch.device | None = None) -> tuple[MultiStemNet, dict]:
     ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
     meta = ckpt["meta"]
     model = build_model(meta["arch"], meta["encoder"],
-                        in_channels=meta["in_channels"], pretrained=False)
+                        variants=[var_mod.get(k) for k in meta["variants"]],
+                        pretrained=False)
     model.load_state_dict(ckpt["state_dict"])
     if device:
         model.to(device)
