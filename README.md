@@ -15,17 +15,28 @@ trail, 59 of 60 harvested tiles passing `trailer vet`.
 
 A full-set run has completed and been scored on the eval-role tiles — the
 honest estimate, since validation F1 (0.6944, the number that picked this
-checkpoint) is not. The gap between them is real: held-out **active/faint**
-generalises reasonably (`dem1` f1@0.5 0.683, active 0.850 — one held-out tile,
-`junction_pass`), but held-out **lifecycle** does not. On `abandoned_south`,
-the one held-out abandoned-trail tile, `dem1` — the variant that actually
-exports — scores f1@0.5 **0.000** (lifecycle f1 0.004); `lidar05` barely
-better at 0.025. A control tile with zero trail pixels (`north_guard`) keeps
-false positives low for both variants, so the model is not noisy everywhere;
-it specifically does not find abandoned trails outside what it was trained on.
-That is despite the corpus rebalance below aiming squarely at lifecycle
-representation. Whether that is a real capability gap or an artifact of
-scoring on a single held-out lifecycle tile is open — see `trailer-360`.
+checkpoint) is not. Held-out **active/faint** generalises reasonably (`dem1`
+f1@0.5 0.683, active 0.850 — one held-out tile, `junction_pass`). Held-out
+**lifecycle** reads f1@0.5 **0.000** on `abandoned_south`, and that number
+should be discarded rather than believed: the tile's single OSM way was traced
+from a historical topo map (`source=USTopo`), and it has no tread. Cross-
+sections along it, with a quadratic fit to the 2.5–12 m flanks removed so the
+hillslope and the drainage it follows come out, give a centreline residual of
+**−0.1 ± 0.3 cm** against a +0.8 cm random-line null, where tiles the model
+scores 0.4–0.9 on read −2 to −14 cm. There is nothing there to find.
+
+A leave-AOI-out control run settles the question the single tile could not.
+Retraining the same recipe with six lifecycle and four faint AOIs withheld from
+training entirely scores, on ground the model has never seen, `dem1` lifecycle
+f1 median **0.614** (range 0.562–0.724) and `lidar05` **0.753** (0.670–0.798) —
+level with the within-tile validation band. Lifecycle transfers. Faint is the
+class with a real spread: `dem1` median 0.484 over four unseen AOIs, but 0.133
+at the low end. See `trailer-360`.
+
+The control tile with zero trail pixels (`north_guard`) keeps false positives
+low for both variants — `fp_rate@0.5` 0.00069 `dem1`, 0.00018 `lidar05` — but
+**100%** of `dem1`'s sit in the outer four pixels of the tile, which is a
+tiling artefact rather than terrain confusion. See `trailer-c02`.
 
 Harvesting was the point of that build, and it worked. Trainable labels went
 from 34.2 km active / 0.98 faint / 0.00 lifecycle to **69.7 / 65.2 / 98.9** — a
