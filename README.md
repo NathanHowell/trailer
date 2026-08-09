@@ -13,9 +13,19 @@ Data pipeline, survey and training stack are done and run end to end. The
 74-tile build (14 curated + 60 harvested) is complete: 233.8 km of labelled
 trail, 59 of 60 harvested tiles passing `trailer vet`.
 
-A full-set run is in progress. Numbers here are mid-run and will be replaced by
-held-out figures when it completes — validation F1 is not the honest estimate,
-and the eval-role tiles are deliberately scored only once, at the end.
+A full-set run has completed and been scored on the eval-role tiles — the
+honest estimate, since validation F1 (0.6944, the number that picked this
+checkpoint) is not. The gap between them is real: held-out **active/faint**
+generalises reasonably (`dem1` f1@0.5 0.683, active 0.850 — one held-out tile,
+`junction_pass`), but held-out **lifecycle** does not. On `abandoned_south`,
+the one held-out abandoned-trail tile, `dem1` — the variant that actually
+exports — scores f1@0.5 **0.000** (lifecycle f1 0.004); `lidar05` barely
+better at 0.025. A control tile with zero trail pixels (`north_guard`) keeps
+false positives low for both variants, so the model is not noisy everywhere;
+it specifically does not find abandoned trails outside what it was trained on.
+That is despite the corpus rebalance below aiming squarely at lifecycle
+representation. Whether that is a real capability gap or an artifact of
+scoring on a single held-out lifecycle tile is open — see `trailer-360`.
 
 Harvesting was the point of that build, and it worked. Trainable labels went
 from 34.2 km active / 0.98 faint / 0.00 lifecycle to **69.7 / 65.2 / 98.9** — a

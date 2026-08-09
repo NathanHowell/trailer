@@ -38,10 +38,23 @@ log = logging.getLogger(__name__)
 
 
 def _loaders(dirs: list[Path], variants, cfg) -> dict[str, tuple]:
-    """One train/val loader pair per input variant, over the same tiles."""
+    """One train/val loader pair per input variant, over the same tiles.
+
+    Workers must be spawned, not forked. The default start method is
+    platform-dependent -- 'spawn' on macOS, 'fork' on Linux -- and this run
+    has already touched CUDA and GDAL by the time these loaders are built.
+    Forking a process with a live CUDA context and background driver threads
+    is unsupported: the child does not use CUDA itself, but the corrupted
+    heap/library state it can inherit shows up anywhere, and here it showed
+    up as GDAL 'ZIPDecode: Decoding error' on the very first batch, reading
+    dtm_clean.tif files that are not actually corrupt. Pin this explicitly
+    rather than rely on whatever the OS defaults to.
+    """
     out = {}
+    ctx = "spawn" if cfg.workers > 0 else None
     common = dict(batch_size=cfg.batch, num_workers=cfg.workers,
-                  pin_memory=False, persistent_workers=cfg.workers > 0)
+                  pin_memory=False, persistent_workers=cfg.workers > 0,
+                  multiprocessing_context=ctx)
     for v in variants:
         train = TileDataset(dirs, v, body_crop=cfg.crop, split="train",
                             samples=cfg.samples, augment=True,
