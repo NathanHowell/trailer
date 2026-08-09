@@ -238,6 +238,69 @@ def build(out_dir: Path = DEFAULT_OUT.parent) -> dict:
     return g
 
 
+def real_parity(checkpoint: Path, tile_dir: Path, out_dir: Path,
+                variant: str = "dem1", window: int = 256,
+                max_px: int = 1024, overlap: float = 0.5,
+                tta: bool = False) -> dict:
+    """Full-scale parity fixture: the real model, on real elevation.
+
+    The committed fixture in :func:`_tile_case` runs a 2.6 KB stand-in, which is
+    the right trade for a test that must live in git -- it exercises the tiling
+    and the session plumbing, and those are what the plugin reimplements.
+
+    What it cannot exercise is the trained graph itself: a ResNet-34 encoder,
+    the im2col median filter, and ~99 MB of initialisers, at a 256 px window
+    rather than 32. Whether onnxruntime's *Java* runtime handles all of that is
+    a different question from whether Python's does, and it is not one a stub
+    can answer.
+
+    So this writes the fixture somewhere outside the repository and the plugin
+    has an opt-in test that points at it. Checked-in code, generated artefact,
+    nothing 99 MB in git.
+    """
+    import numpy as np
+    import torch
+
+    from . import infer
+    from . import model as model_mod
+    from . import variants as var_mod
+    from .data import full_tile
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    v = var_mod.get(variant)
+    net, meta = model_mod.load(checkpoint)
+
+    onnx = out_dir / "model.onnx"
+    info = model_mod.export_onnx(net, variant, onnx, size=window,
+                                 overlap=overlap, tta=tta)
+    (out_dir / "model.json").write_text(json.dumps(info, indent=1))
+
+    z, canopy, *_ = full_tile(tile_dir, v)
+    # Bounded so the check stays minutes rather than hours; the corner is as
+    # good as anywhere and keeps the ragged-edge padding in play.
+    z = np.ascontiguousarray(z[:, :max_px, :max_px])
+    _, h, w = z.shape
+
+    with torch.no_grad():
+        prob = infer.predict(net, z, canopy=None, variant=variant,
+                             body_tile=window, overlap=overlap,
+                             device="cpu", tta=tta)
+
+    z.astype("<f4").tofile(out_dir / "z.f32")
+    prob[0].astype("<f4").tofile(out_dir / "expected.f32")
+    manifest = {
+        "checkpoint": str(checkpoint), "tile": tile_dir.name,
+        "variant": variant, "h": h, "w": w,
+        "out_h": prob.shape[-2], "out_w": prob.shape[-1],
+        "stride": v.stride, "window": window, "tta": tta,
+        "mean_prob": round(float(prob.mean()), 6),
+    }
+    (out_dir / "parity.json").write_text(json.dumps(manifest, indent=1))
+    log.info("wrote %s: %dx%d elevation, %dx%d probability, mean %.4f",
+             out_dir, h, w, prob.shape[-2], prob.shape[-1], float(prob.mean()))
+    return manifest
+
+
 def write(out: Path = DEFAULT_OUT) -> Path:
     g = build(out.parent)
     out.parent.mkdir(parents=True, exist_ok=True)

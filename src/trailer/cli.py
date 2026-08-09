@@ -305,6 +305,22 @@ def cmd_golden(args) -> int:
     return 0
 
 
+def cmd_parity(args) -> int:
+    from . import golden
+
+    m = golden.real_parity(Path(args.checkpoint), Path(args.tile),
+                           Path(args.out), variant=args.variant,
+                           window=args.window, max_px=args.max_px,
+                           overlap=args.overlap, tta=args.tta)
+    print(f"wrote {args.out}")
+    for k, v in m.items():
+        print(f"  {k}: {v}")
+    print("\nCheck the plugin against it with:\n"
+          f"  mvn -f plugin/pom.xml test -Dtest=RealModelParityTest "
+          f"-Dtrailer.parity={Path(args.out).resolve()}")
+    return 0
+
+
 def cmd_export(args) -> int:
     import json as _json
     from . import model as model_mod
@@ -494,6 +510,24 @@ def main(argv=None) -> int:
                    help="bake the 8-fold D4 average into the graph: better, at "
                         "8x inference cost, and not switchable afterwards")
     ex.set_defaults(fn=cmd_export)
+
+    pa = sub.add_parser("parity", parents=[common],
+                        help="full-scale parity fixture: the real model on real "
+                             "elevation, for the plugin's opt-in test")
+    pa.add_argument("--checkpoint", default="runs/latest/best.pt")
+    pa.add_argument("--tile", required=True,
+                    help="a built tile directory, e.g. data/tiles/abandoned_south")
+    pa.add_argument("--out", required=True,
+                    help="output directory; keep it outside the repo, it holds "
+                         "a ~99 MB .onnx")
+    pa.add_argument("--variant", default="dem1")
+    pa.add_argument("--window", type=int, default=256)
+    pa.add_argument("--max-px", type=int, default=1024,
+                    help="crop the tile to this square, so the check stays "
+                         "minutes rather than hours")
+    pa.add_argument("--overlap", type=float, default=0.5)
+    pa.add_argument("--tta", action="store_true")
+    pa.set_defaults(fn=cmd_parity)
 
     g = sub.add_parser("golden", parents=[common],
                        help="regenerate the JOSM plugin's tiler test fixtures")
