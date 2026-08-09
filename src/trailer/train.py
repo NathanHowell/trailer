@@ -17,6 +17,7 @@ recall and false-positive rate that exists here.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -66,6 +67,52 @@ def _param_groups(net, lr: float):
             continue
         (enc if name.startswith("body.encoder.") else dec).append(p)
     return [{"params": enc, "lr": lr * 0.1}, {"params": dec, "lr": lr}]
+
+
+def _checkpoint(path, net, opt, sched, scaler, meta, best, history) -> None:
+    """Everything needed to carry on, in a file the plain loader still reads.
+
+    ``state_dict`` and ``meta`` stay at the top level and mean what they always
+    did, so ``model.load`` -- and therefore export, parity and inference --
+    treat this like any other checkpoint and ignore the rest.
+    """
+    torch.save({"state_dict": net.state_dict(), "meta": meta,
+                "opt": opt.state_dict(), "sched": sched.state_dict(),
+                "scaler": scaler.state_dict(),
+                "best": best, "history": history}, path)
+
+
+def _resume(path, net, opt, sched, scaler, device, total_steps, epochs):
+    """Restore a run. Returns (start_epoch, best, history).
+
+    A checkpoint written before this existed carries weights and nothing else.
+    That is a *warm start*, not a resume: the optimiser moments and the position
+    in the LR schedule are gone, so training restarts the whole OneCycle from
+    those weights. It is a legitimate thing to do and a different thing from
+    what the caller asked for, so it says so loudly rather than quietly
+    producing a run whose schedule nobody can reconstruct later.
+    """
+    ck = torch.load(path, map_location=device, weights_only=False)
+    net.load_state_dict(ck["state_dict"])
+
+    if "opt" not in ck:
+        log.warning("%s holds weights only: no optimiser or scheduler state. "
+                    "Warm start -- AdamW moments reset and the LR schedule "
+                    "restarts from step 0 over %d epochs.", path, epochs)
+        return 0, -1.0, []
+
+    saved = ck["sched"].get("total_steps")
+    if saved != total_steps:
+        log.warning("scheduler was built for %s steps, this run plans %d; "
+                    "the LR curve will not line up. Match --epochs to the "
+                    "original run to resume faithfully.", saved, total_steps)
+    opt.load_state_dict(ck["opt"])
+    sched.load_state_dict(ck["sched"])
+    scaler.load_state_dict(ck["scaler"])
+    start = ck["meta"]["epoch"] + 1
+    log.info("resumed %s at epoch %d, best stratified f1 %.4f",
+             path, start + 1, ck["best"])
+    return start, ck["best"], ck["history"]
 
 
 def estimate_prior(dataset, n: int = 256) -> float:
@@ -180,8 +227,24 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
         opt, max_lr=[g["lr"] for g in opt.param_groups],
         total_steps=cfg.epochs * per_epoch, pct_start=0.15)
 
-    use_amp = device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    # Mixed precision, on whichever accelerator this is. Gating it on "cuda"
+    # meant MPS -- the only accelerator this project actually has -- trained
+    # entirely in fp32.
+    #
+    # bf16 is the default on MPS rather than fp16 because it carries fp32's
+    # exponent range: the input bands use NaN as the nodata sentinel and the
+    # derivative maths clips against absolute bounds, and fp16's 65504 ceiling
+    # is close enough to those to be worth not thinking about. Only fp16 needs
+    # loss scaling, so the scaler is enabled for it alone.
+    amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(cfg.amp)
+    use_amp = amp_dtype is not None and device.type in ("cuda", "mps")
+    if cfg.amp != "off" and not use_amp:
+        log.warning("--amp %s ignored: no autocast on %s", cfg.amp, device.type)
+    autocast = ((lambda: torch.amp.autocast(device.type, dtype=amp_dtype))
+                if use_amp else contextlib.nullcontext)
+    scaler = torch.amp.GradScaler(
+        device.type, enabled=use_amp and amp_dtype is torch.float16)
+    log.info("precision: %s", f"autocast {cfg.amp}" if use_amp else "fp32")
 
     outdir = Path(cfg.out)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -191,9 +254,14 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
             "tolerance_m": cfg.tolerance_m, "jitter_m": cfg.jitter_m,
             "tiles": [d.name for d in train_dirs]}
 
-    best = -1.0
-    history = []
-    for epoch in range(cfg.epochs):
+    best, history = -1.0, []
+    start_epoch = 0
+    if cfg.resume:
+        start_epoch, best, history = _resume(
+            Path(cfg.resume), net, opt, sched, scaler, device,
+            cfg.epochs * per_epoch, cfg.epochs)
+
+    for epoch in range(start_epoch, cfg.epochs):
         net.train()
         ramp = _ramp(epoch, cfg.cldice_warmup)
         t0 = time.time()
@@ -206,7 +274,7 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
         for batches in zip(*(t for t, _ in loaders.values())):
             for v, batch in zip(variants, batches):
                 opt.zero_grad(set_to_none=True)
-                with torch.amp.autocast("cuda", enabled=use_amp):
+                with autocast():
                     logits, y, w, _ = _forward(net, batch, v.key, device)
                     loss, parts = criterion(logits, y, w, ramp=ramp)
                 if not math.isfinite(loss.item()):
@@ -261,7 +329,11 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
             log.info("  new best (stratified f1 %.4f) -> %s", best,
                      outdir / "best.pt")
 
-    model_mod.save(net, outdir / "last.pt", meta | {"epoch": cfg.epochs - 1})
+        # Every epoch, not just at the end: a 22-hour run that is interrupted
+        # at hour 20 should cost minutes, not the run. This is what --resume
+        # reads.
+        _checkpoint(outdir / "last.pt", net, opt, sched, scaler,
+                    meta | {"epoch": epoch}, best, history)
 
     # Held-out set, scored once, with the best checkpoint.
     net, _ = model_mod.load(outdir / "best.pt", device)

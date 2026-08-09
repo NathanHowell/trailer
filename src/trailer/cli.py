@@ -449,6 +449,15 @@ def main(argv=None) -> int:
                         "(default lidar05,dem1)")
     t.add_argument("--batch", type=int, default=8)
     t.add_argument("--epochs", type=int, default=40)
+    t.add_argument("--amp", default="bf16", choices=["off", "fp16", "bf16"],
+                   help="mixed precision on cuda or mps; bf16 keeps fp32's "
+                        "exponent range, which the NaN nodata sentinel and the "
+                        "clipped derivative maths both care about")
+    t.add_argument("--resume", default=None, metavar="CKPT",
+                   help="continue from a checkpoint. last.pt restores the "
+                        "optimiser and LR schedule too; a weights-only file "
+                        "(best.pt from an older run) is a warm start and says "
+                        "so")
     t.add_argument("--samples", type=int, default=2000,
                    help="crops drawn per epoch")
     t.add_argument("--lr", type=float, default=3e-4)
