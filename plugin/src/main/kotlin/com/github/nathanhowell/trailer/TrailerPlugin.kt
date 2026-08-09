@@ -3,12 +3,14 @@ package com.github.nathanhowell.trailer
 import org.openstreetmap.josm.gui.MainApplication
 import org.openstreetmap.josm.gui.MainMenu
 import org.openstreetmap.josm.gui.MapFrame
+import org.openstreetmap.josm.gui.preferences.PreferenceSetting
 import org.openstreetmap.josm.plugins.Plugin
 import org.openstreetmap.josm.plugins.PluginInformation
 import org.openstreetmap.josm.tools.Logging
 
 /**
- * Entry point. Deliberately does almost nothing yet.
+ * Entry point: registers the action and the preferences tab, and owns nothing
+ * else.
  *
  * The plugin's job is to show a trail-probability heatmap over a mapper's
  * viewport, derived from USGS 3DEP bare-earth elevation, so a human can trace
@@ -24,7 +26,8 @@ import org.openstreetmap.josm.tools.Logging
  * The weights are not in this jar. They are ~99 MB, change on a different
  * schedule from the code, and are under a different licence (CC BY-SA, against
  * the code's MIT), so a mapper points at a file rather than downloading one
- * bundled. Model distribution is tracked separately in beads.
+ * bundled, through [TrailerPreference]. Model distribution is tracked
+ * separately in beads.
  *
  * [Tiler] and [Inference] are parity-tested against generated Python values,
  * because they reimplement existing Python and are therefore the parts most
@@ -45,4 +48,7 @@ class TrailerPlugin(info: PluginInformation) : Plugin(info) {
     override fun mapFrameInitialized(oldFrame: MapFrame?, newFrame: MapFrame?) {
         if (newFrame == null) ModelStore.close()
     }
+
+    /** Where the mapper points this at a model; see [TrailerPreference]. */
+    override fun getPreferenceSetting(): PreferenceSetting = TrailerPreference()
 }
