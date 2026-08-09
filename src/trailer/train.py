@@ -360,7 +360,9 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
 
     report = {"config": {k: v for k, v in vars(cfg).items() if k != "fn"},
               "best_val_stratified_f1": round(best, 4), "history": history,
-              "held_out": held}
+              "held_out": held,
+              # The number a deployment claim should quote, and it is a spread.
+              "held_out_spread": metrics.held_out_spread(held)}
     (outdir / "report.json").write_text(json.dumps(report, indent=1, default=str))
     log.info("wrote %s", outdir / "report.json")
     return report

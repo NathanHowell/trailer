@@ -143,8 +143,13 @@ class Stratified:
                 if best is None or f1 > best[0]:
                     best = (f1, p, r, t)
             f1, p, r, t = best
+            # Labelled pixels behind this class's recall. Carried so a consumer
+            # can tell a measurement from a rumour: several held-out tiles hold
+            # a class on a few hundred metres of way, and a spread that pools
+            # those with kilometre-scale ones reads as model instability when it
+            # is sample size.
             out[c] = {"f1": round(f1, 4), "p": round(p, 4),
-                      "r": round(r, 4), "t": t}
+                      "r": round(r, 4), "t": t, "px": int(ysum)}
         score = float(np.mean([v["f1"] for v in out.values()])) if out else 0.0
         return {"by_class": out, "score": round(score, 4),
                 "classes": sorted(out)}
@@ -178,3 +183,57 @@ def false_positive_rate(prob: np.ndarray, w: np.ndarray,
     if not m.any():
         return float("nan")
     return float((prob.ravel()[m] >= threshold).mean())
+
+
+#: Labelled body pixels a class needs in a tile before its F1 there is treated
+#: as a measurement. A trail is 4-9 m of bench at 1 m output, so this is
+#: roughly a kilometre of way -- the same floor the held-out tiles were
+#: selected on.
+MIN_CLASS_PX = 4000
+
+
+def held_out_spread(held_out: dict, min_px: int = MIN_CLASS_PX) -> dict:
+    """Per-class held-out F1 across eval AOIs, as a spread rather than a number.
+
+    A single held-out tile per class is not an estimate. The same checkpoint
+    scores per-tile lifecycle F1 anywhere from 0.00 to 0.94 across this corpus,
+    so one draw says nothing about the model -- which is exactly how a topo-map
+    trace with no measurable tread came to be read as a capability gap.
+
+    Tiles carrying an ``advisory`` are excluded from the aggregate but not from
+    the report: their number is not evidence, and averaging it in would launder
+    that back into one. See ``aois.Aoi.advisory``.
+
+    A wide spread here is information, not noise. Some held-out tiles hold a
+    class at a tread the QA transects can barely see, and a class that swings by
+    0.5 across AOIs is a fact about how much a deployment claim can lean on any
+    one of them.
+    """
+    out: dict[str, dict] = {}
+    for variant, tiles in held_out.items():
+        per_class: dict[str, list] = {}
+        thin: dict[str, list] = {}
+        for name, rec in sorted(tiles.items()):
+            if rec.get("advisory"):
+                continue
+            for c, v in rec.get("strat", {}).get("by_class", {}).items():
+                # A class present on a few hundred metres says nothing about
+                # recall for it. Dropped from the aggregate, and counted so the
+                # report can say how many were dropped rather than going quiet.
+                if v.get("px", min_px) < min_px:
+                    thin.setdefault(c, []).append(name)
+                    continue
+                per_class.setdefault(c, []).append((name, v["f1"]))
+        summary = {}
+        for c, pairs in sorted(per_class.items()):
+            vals = sorted(f1 for _, f1 in pairs)
+            summary[c] = {
+                "n": len(vals),
+                "median": round(float(np.median(vals)), 4),
+                "min": round(vals[0], 4),
+                "max": round(vals[-1], 4),
+                "tiles": {n: f1 for n, f1 in sorted(pairs, key=lambda t: t[1])},
+                "too_thin": sorted(thin.get(c, [])),
+            }
+        out[variant] = summary
+    return out

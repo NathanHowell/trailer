@@ -87,6 +87,14 @@ report path=(run / "report.json"):
                            for c in rec["strat"]["classes"]))
             if rec.get("advisory"):
                 print(f"  {'':8s} {'':18s} ^ NOT EVIDENCE: {rec['advisory']}")
+    # Recomputed rather than read, so an older report.json still summarises.
+    from trailer import metrics
+    print("per class over eval AOIs (advisory tiles excluded):")
+    for v, classes in metrics.held_out_spread(r["held_out"]).items():
+        for c, s in classes.items():
+            print(f"  {v:8s} {c:10s} n={s['n']} median={s['median']:.3f} "
+                  f"range={s['min']:.3f}-{s['max']:.3f}  " +
+                  " ".join(f"{n}={f:.2f}" for n, f in s["tiles"].items()))
     PY
 
 # ---------------------------------------------------------------- corpus

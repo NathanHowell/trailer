@@ -10,46 +10,55 @@ overlay a mapper traces over is a different thing entirely.
 ## Status
 
 Data pipeline, survey and training stack are done and run end to end. The
-74-tile build (14 curated + 60 harvested) is complete: 233.8 km of labelled
-trail, 59 of 60 harvested tiles passing `trailer vet`.
+74-tile build is complete — 233.8 km of labelled trail, 59 of 60 harvested tiles
+passing `trailer vet` — and splits 62 training against 11 held out, with eight
+of the held-out ones promoted out of the harvest pool to build the spread below.
 
-A full-set run has completed and been scored on the eval-role tiles — the
-honest estimate, since validation F1 (0.6944, the number that picked this
-checkpoint) is not. Held-out **active/faint** generalises reasonably (`dem1`
-f1@0.5 0.683, active 0.850 — one held-out tile, `junction_pass`). Held-out
-**lifecycle** reads f1@0.5 **0.000** on `abandoned_south`, and that number
-should be discarded rather than believed: the tile's single OSM way was traced
-from a historical topo map (`source=USTopo`), and nothing along it is visible to
-LiDAR in any channel we can measure.
+The held-out set is now **ten AOIs**, at least three carrying each visibility
+class, and the numbers below are a spread rather than a single tile. `dem1` is
+the variant that exports, so it is the one that decides anything:
 
-A matched filter for the tread notch and the bench-and-berm, normalised against
-each cross-section's own terrain roughness, spikes at zero offset on the active
-control (+1.1 flank MAD) and on a lifecycle tile the model scores 0.94 on (+2.3).
-On `abandoned_south` it finds **no local peak at any offset from −40 to +40 m** —
-only the broad ramp of the valley side. Re-fetching the point cloud that the
-build evicted and going after the one channel the pipeline never derives,
-**return intensity**, looked at first like a find: a sharp 4 m spike of +1.7
-flank s.d. exactly on the line. Splitting the way by whether the local terrain
-is channel-like puts all of it in the drainage — +1.7 s.d. over 510 channel
-samples, **−0.2 over 765 hillslope samples**. What is bright along that line is
-the creek. Ground-return density, the canopy-gap signature, reads +2.7% against
-+22% for the active control and +46% for the faint one.
+| class | AOIs | median | range |
+| --- | --- | --- | --- |
+| active | 4 | **0.822** | 0.597–0.957 |
+| faint | 3 | **0.882** | 0.331–0.959 |
+| lifecycle | 5 | **0.673** | 0.571–0.791 |
 
-None of that proves no trail is there on the ground. It does mean this tile
-cannot measure whether the model finds one.
+`lidar05` tracks it within a few points (0.830 / 0.881 / 0.683). The control tile
+with no mapped ways fires on 1 pixel in 100,000. Validation F1 for the same
+checkpoint is 0.6497, and it is not the honest number — the eval tiles are.
 
-A leave-AOI-out control run settles the question the single tile could not.
-Retraining the same recipe with six lifecycle and four faint AOIs withheld from
-training entirely scores, on ground the model has never seen, `dem1` lifecycle
-f1 median **0.614** (range 0.562–0.724) and `lidar05` **0.753** (0.670–0.798) —
-level with the within-tile validation band. Lifecycle transfers. Faint is the
-class with a real spread: `dem1` median 0.484 over four unseen AOIs, but 0.133
-at the low end. See `trailer-360`.
+Two things in that table are worth saying plainly, because the previous version
+of this section got both wrong from a single tile each. **Lifecycle is the
+tightest class, not the broken one**: 0.571–0.791 across five unseen AOIs, where
+this project previously reported 0.000 and called it a possible capability gap.
+And **faint is not the weak class either** — its median is the highest of the
+three. What is weak is one *tile*: `junction_pass`, whose faint way carries a
+mapper's own note that its position is uncertain, and which the spread now drops
+as too thin to count rather than quoting as the faint result.
 
-The control tile with zero trail pixels (`north_guard`) now scores
-`fp_rate@0.5` of exactly **0.00000** for both variants. It read 0.00069 until
-the tiling bug described under Deployment was fixed, and every false-positive
-rate published before that was inflated by it.
+The class ranges are still wide, and that is the finding, not noise. Faint runs
+0.331 to 0.959 across three AOIs. A deployment claim can lean on the median only
+as far as the terrain resembles the middle of that range.
+
+`abandoned_south` remains in the set and remains excluded from all of the above:
+its single OSM way was traced from a historical topo map (`source=USTopo`), and
+nothing along it is visible to LiDAR in any channel measured. A matched filter
+for the tread notch and the bench-and-berm, normalised against each
+cross-section's own terrain roughness, spikes at zero offset on the active
+control (+1.1 flank MAD) and on a lifecycle tile the model scores 0.94 on (+2.3);
+on `abandoned_south` it finds **no local peak at any offset from −40 to +40 m**.
+Re-fetching the point cloud the build evicted and going after the one channel
+the pipeline never derives, **return intensity**, looked at first like a find: a
+sharp 4 m spike of +1.7 flank s.d. exactly on the line. Splitting the way by
+whether the local terrain is channel-like puts all of it in the drainage — +1.7
+s.d. over 510 channel samples, **−0.2 over 765 hillslope samples**. What is
+bright along that line is the creek. Ground-return density, the canopy-gap
+signature, reads +2.7% against +22% for the active control.
+
+None of that proves no trail is there on the ground. It means this tile cannot
+measure whether the model finds one, so `report.json` carries the reason beside
+the number and every consumer prints it. See `trailer-360`, `trailer-05o`.
 
 Harvesting was the point of that build, and it worked. Trainable labels went
 from 34.2 km active / 0.98 faint / 0.00 lifecycle to **69.7 / 65.2 / 98.9** — a
@@ -505,9 +514,27 @@ bins them onto a 1 km grid, and ranks cells by how much of that kind of way they
 hold — 1202 ways over 1453 cells, of which the top 60 carry 142.6 km, roughly
 145× the faint evidence available before.
 
+**Ten held-out tiles**, three or more carrying each visibility class. Eight were
+promoted out of the harvest pool for this, on a floor rather than a ranking:
+each carries at least a kilometre of its class at a tread-over-noise effect size
+of 0.15 or better, and the set then spans the measurable range instead of
+skimming the strongest, which would build an eval set that flatters the model.
+Every note records the measured tread. Held out per class this way, the corpus
+covers 1430–3009 m and 0–92% canopy.
+
+One tile per class, which is what this was before, is not an estimate: the same
+checkpoint scores per-tile lifecycle F1 anywhere from 0.00 to 0.94 across the
+corpus, so a single draw says nothing about the model. `report.json` therefore
+carries `held_out_spread` — per class, the median, the range and every AOI's
+own number — and that spread is what a deployment claim should quote.
+
 Held-out tiles are excluded with a 600 m buffer, which has to exceed the model's
 context window rather than merely the tile edge, or a training crop can see
-pixels a held-out crop also sees.
+pixels a held-out crop also sees. The harvest grid steps a kilometre, so a
+promoted tile's neighbours are one cell away and the buffer is easy to violate
+by accident — the first pass at the held-out set picked three tiles *adjacent*
+to training cells. `tests/test_aois.py` now checks every held-out tile against
+every training tile rather than trusting the selection.
 
 `trailer vet` gates harvested tiles on ground density, valid fraction and
 in-tile trail length. Signal strength is deliberately *not* among the gates:

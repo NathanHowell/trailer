@@ -228,6 +228,12 @@ def cmd_train(args) -> int:
                            rec["strat"]["classes"]))
             if rec.get("advisory"):
                 print(f"      ^ NOT EVIDENCE: {rec['advisory']}")
+    print("\nheld-out per class, over eval AOIs (advisory tiles excluded):")
+    for variant, classes in report.get("held_out_spread", {}).items():
+        print(f"  {variant}")
+        for c, s in classes.items():
+            print(f"    {c:10s} n={s['n']}  median {s['median']:.3f}  "
+                  f"range {s['min']:.3f}-{s['max']:.3f}")
     return 0
 
 

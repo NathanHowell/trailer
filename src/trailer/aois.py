@@ -117,6 +117,77 @@ AOIS: tuple[Aoi, ...] = (
                  "over 765 hillslope ones). Scoring abandoned-trail recall "
                  "here measures the label, not the model"),
 
+    # ---- held-out spread ---------------------------------------------------
+    #
+    # Promoted out of the harvest pool so every visibility class is scored on at
+    # least three AOIs the model has never seen. One tile per class was never an
+    # eval set: across this corpus the same checkpoint scores per-tile lifecycle
+    # F1 anywhere from 0.00 to 0.94, so a single draw carries no information
+    # about the model -- which is how a topo-map trace with no measurable tread
+    # came to be read as a capability gap. See trailer-360.
+    #
+    # Three constraints, in order:
+    #
+    # * **No neighbour inside the 600 m buffer.** The harvest grid puts cells a
+    #   kilometre apart, so promoting a tile whose neighbour still trains leaks
+    #   context straight across the split -- a training crop sees pixels a
+    #   held-out crop also sees. A first pass at this set picked three tiles
+    #   that were *adjacent* to training cells, gap ~0 m. Checked in
+    #   test_aois.py rather than by eye.
+    # * **A floor, not a ranking.** Each carries at least ~1 km of its class at
+    #   an effect size (tread over per-transect noise) of 0.15 or better, and
+    #   the set then spans the measurable range rather than skimming the
+    #   strongest. Choosing the clearest tiles would build an eval set that
+    #   flatters the model.
+    # * **Spread of terrain**: 1430-3009 m, 0-92% canopy, 42-527 m relief.
+    #
+    # Numbers are from `trailer qa`: berm-to-centre incision against
+    # per-transect terrain noise, and `eff` is their ratio.
+    Aoi("h_381905_s1193237", "Held-out active/lifecycle, 38.19N 119.32W",
+        38.19046, -119.32371, role="eval",
+        notes="2136 m, 8% canopy, 7.8 ground/m2, 53 m relief. "
+              "active 4.60 km, 88 mm tread on 125 mm noise (SNR 33.7, eff 0.71); "
+              "lifecycle 2.04 km, 22 mm tread on 113 mm noise (SNR 6.2, eff 0.20)."),
+    Aoi("h_373473_s1185298", "Held-out active/lifecycle, 37.35N 118.53W",
+        37.34732, -118.52982, role="eval",
+        notes="1681 m, 4% canopy, 6.7 ground/m2, 246 m relief. The low-signal "
+              "end of the active range, deliberately. "
+              "active 4.49 km, 41 mm tread on 200 mm noise (SNR 9.5, eff 0.20); "
+              "lifecycle 4.70 km, 25 mm tread on 199 mm noise (SNR 6.0, eff 0.13)."),
+    Aoi("h_365429_s1186925", "Held-out active/lifecycle, forested, 36.54N 118.69W",
+        36.54291, -118.69255, role="eval",
+        notes="1430 m, 92% canopy, 5.1 ground/m2, 336 m relief. The densest "
+              "canopy in the held-out set, and the thinnest ground returns. "
+              "active 2.43 km, 38 mm tread on 181 mm noise (SNR 7.2, eff 0.21); "
+              "lifecycle 2.25 km, 47 mm tread on 222 mm noise (SNR 7.0, eff 0.21)."),
+    Aoi("h_368724_s1182959", "Held-out faint, 36.87N 118.30W",
+        36.87239, -118.29591, role="eval",
+        notes="1752 m, 16% canopy, 6.2 ground/m2, 508 m relief. "
+              "faint 3.40 km, 62 mm tread on 164 mm noise (SNR 15.5, eff 0.38). "
+              "Its 0.41 km of active at eff 0.14 is too thin to read."),
+    Aoi("h_370339_s1183661", "Held-out faint, 37.03N 118.37W",
+        37.03385, -118.36611, role="eval",
+        notes="2259 m, 5% canopy, 10.2 ground/m2, 527 m relief. "
+              "faint 2.20 km, 30 mm tread on 144 mm noise (SNR 7.0, eff 0.21). "
+              "Its 0.44 km of active at eff 0.17 is too thin to read."),
+    Aoi("h_364230_s1181657", "Held-out faint, alpine, 36.42N 118.17W",
+        36.42302, -118.16570, role="eval",
+        notes="3009 m, 42% canopy, 19.4 ground/m2, 285 m relief. The alpine end "
+              "of the faint range. "
+              "faint 2.06 km, 27 mm tread on 135 mm noise (SNR 6.4, eff 0.20). "
+              "Also 0.40 km active and 0.74 km lifecycle -- both under a "
+              "kilometre, so read those two here as thin rather than as "
+              "evidence."),
+    Aoi("h_376597_s1187516", "Held-out lifecycle, 37.66N 118.75W",
+        37.65968, -118.75160, role="eval",
+        notes="2067 m, 0% canopy, 7.6 ground/m2, 42 m relief. Flat and quiet, "
+              "the cleanest lifecycle case in the held-out set. "
+              "lifecycle 2.77 km, 32 mm tread on 72 mm noise (SNR 16.3, eff 0.44)."),
+    Aoi("h_362058_s1182515", "Held-out lifecycle, forested, 36.21N 118.25W",
+        36.20579, -118.25146, role="eval",
+        notes="2651 m, 45% canopy, 10.2 ground/m2, 94 m relief. "
+              "lifecycle 2.69 km, 52 mm tread on 146 mm noise (SNR 13.0, eff 0.35)."),
+
     # ---- control -----------------------------------------------------------
     Aoi("north_guard", "North Guard (control)", 36.75154, -118.48835,
         role="control",
@@ -125,6 +196,9 @@ AOIS: tuple[Aoi, ...] = (
               "can be measured honestly."),
 )
 
+BY_KEY: dict[str, Aoi] = {a.key: a for a in AOIS}
+
+
 #: Auto-selected tiles written by `trailer harvest`. Kept in a generated file
 #: rather than appended here: this module is hand-annotated with what each tile
 #: is *for*, and hundreds of machine-picked entries would drown that.
@@ -132,20 +206,29 @@ HARVEST_REGISTRY = Path("data/harvest.json")
 
 
 def load_harvest(path: Path | None = None) -> tuple[Aoi, ...]:
+    """Machine-picked tiles, minus any this module already annotates by hand.
+
+    The hand-annotated entry wins, and that precedence is load-bearing rather
+    than tidy. ``data/harvest.json`` is gitignored and machine-local, so a tile
+    promoted out of the harvest pool into an eval role here is promoted *only
+    here*. Without this filter, a workspace whose registry still listed it would
+    load the same key twice with two different roles, the harvest copy would win
+    by insertion order, and the tile would quietly go back to training -- an
+    eval set that silently dissolves when the work moves to another machine.
+    """
     path = path or HARVEST_REGISTRY
     if not path.exists():
         return ()
     return tuple(
         Aoi(**(rec | {"flags": frozenset(rec.get("flags", ()))}))
         for rec in json.loads(path.read_text())
+        if rec.get("key") not in BY_KEY
     )
 
 
 def all_aois(harvest: bool = True) -> tuple[Aoi, ...]:
     return AOIS + (load_harvest() if harvest else ())
 
-
-BY_KEY: dict[str, Aoi] = {a.key: a for a in AOIS}
 
 
 def advisory(key: str) -> str:

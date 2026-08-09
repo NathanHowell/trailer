@@ -164,3 +164,76 @@ def test_block_min_nonzero_prefers_the_lower_code():
     out = block_min_nonzero(a, 2)
     assert out.tolist() == [[2.0, 0.0], [0.0, 3.0]]
     assert block_min_nonzero(a, 1) is a
+
+
+def _held(**tiles):
+    """A held_out block: {tile: (advisory, {class: f1})}."""
+    return {"dem1": {
+        name: {"advisory": adv,
+               "strat": {"by_class": {c: {"f1": f} for c, f in by.items()}}}
+        for name, (adv, by) in tiles.items()}}
+
+
+def test_spread_reports_every_eval_aoi_not_just_the_middle():
+    s = metrics.held_out_spread(_held(
+        a=("", {"lifecycle": 0.10}),
+        b=("", {"lifecycle": 0.60}),
+        c=("", {"lifecycle": 0.80})))["dem1"]["lifecycle"]
+    assert s["n"] == 3
+    assert s["median"] == 0.60
+    assert (s["min"], s["max"]) == (0.10, 0.80)
+    # The per-tile values survive: a median hides which AOI is the bad one.
+    assert set(s["tiles"]) == {"a", "b", "c"}
+
+
+def test_an_advisory_tile_is_excluded_from_the_aggregate():
+    # Averaging in a score that is explicitly not evidence would launder it
+    # back into one -- the exact move this whole mechanism exists to block.
+    s = metrics.held_out_spread(_held(
+        good=("", {"lifecycle": 0.60}),
+        also=("", {"lifecycle": 0.70}),
+        bogus=("the label has no measurable tread", {"lifecycle": 0.00})))
+    life = s["dem1"]["lifecycle"]
+    assert life["n"] == 2, "advisory tile must not count toward the spread"
+    assert life["min"] == 0.60
+    assert "bogus" not in life["tiles"]
+
+
+def test_a_class_absent_from_a_tile_does_not_score_it_zero():
+    # A tile with no lifecycle way says nothing about lifecycle recall.
+    s = metrics.held_out_spread(_held(
+        a=("", {"active": 0.80}),
+        b=("", {"active": 0.60, "lifecycle": 0.50})))["dem1"]
+    assert s["active"]["n"] == 2
+    assert s["lifecycle"]["n"] == 1
+    assert s["lifecycle"]["min"] == 0.50
+
+
+def _held_px(**tiles):
+    """A held_out block carrying per-class pixel counts."""
+    return {"dem1": {
+        name: {"advisory": "",
+               "strat": {"by_class": {c: {"f1": f, "px": px}
+                                      for c, (f, px) in by.items()}}}
+        for name, by in tiles.items()}}
+
+
+def test_a_class_measured_on_a_few_hundred_metres_is_not_a_measurement():
+    # 400 px is roughly 100 m of way. Pooling that with kilometre-scale tiles
+    # makes small-sample noise read as model instability.
+    s = metrics.held_out_spread(_held_px(
+        solid=({"active": (0.90, 40000)}),
+        also=({"active": (0.70, 20000)}),
+        sliver=({"active": (0.10, 400)})))["dem1"]["active"]
+    assert s["n"] == 2
+    assert s["min"] == 0.70, "the sliver must not widen the range"
+    assert s["too_thin"] == ["sliver"], "and it must be named, not hidden"
+
+
+def test_the_thin_floor_is_adjustable_and_off_for_old_reports():
+    # A report written before per-class pixel counts existed has no "px", and
+    # must summarise rather than silently drop every tile.
+    old = {"dem1": {"a": {"strat": {"by_class": {"active": {"f1": 0.5}}}}}}
+    assert metrics.held_out_spread(old)["dem1"]["active"]["n"] == 1
+    tiny = metrics.held_out_spread(_held_px(a={"active": (0.5, 100)}), min_px=50)
+    assert tiny["dem1"]["active"]["n"] == 1
