@@ -103,7 +103,7 @@ class ModelChoiceTest {
         Files.writeString(dir.resolve("nolicence.json"), """
             {"variant":"dem1","res_m":1.0,"out_res_m":1.0,
              "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
-             "step_px":128,"pad_mode":"reflect","tta":false,
+             "step_px":128,"edge_windows":"flush","pad_mode":"reflect","tta":false,
              "outputs":["trail_probability","window_taper"],
              "license":"CC-BY-SA-4.0","attribution":""}
         """.trimIndent())

@@ -125,7 +125,7 @@ class FetchPlanTest {
         val half = ModelSpec("""
             {"variant":"future05","res_m":0.5,"out_res_m":1.0,
              "input_px":512,"output_px":256,"stride":2,"overlap":0.5,
-             "step_px":256,"pad_mode":"reflect","tta":false,
+             "step_px":256,"edge_windows":"flush","pad_mode":"reflect","tta":false,
              "outputs":["trail_probability","window_taper"],
              "license":"CC-BY-SA-4.0","attribution":"(c) test"}
         """.trimIndent())

@@ -7,6 +7,7 @@
  "stride": 1,
  "overlap": 0.5,
  "step_px": 128,
+ "edge_windows": "flush",
  "pad_mode": "reflect",
  "tta": true,
  "outputs": [

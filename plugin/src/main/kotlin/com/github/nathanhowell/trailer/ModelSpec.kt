@@ -57,7 +57,19 @@ class ModelSpec(json: String) {
     /** Distance between window origins, in input pixels. Not recomputed here. */
     val stepPx: Int = int("step_px")
 
-    /** How the raster's far edges are extended so windows tile it exactly. */
+    /**
+     * How the ragged tail of a raster is covered.
+     *
+     * Required rather than defaulted, and the reason is the whole point of this
+     * class. The rule this replaced -- extend the raster, let the last window
+     * hang off the end -- produced a false trail along the bottom and right of
+     * every raster, because the model read the mirror seam as a tread. A
+     * sidecar that does not say which rule its weights expect is a version
+     * mismatch, and guessing the old one would silently reinstate the bug.
+     */
+    val edgeWindows: String = required("edge_windows").asText()
+
+    /** How a viewport smaller than one window is extended to fill it. */
     val padMode: String = required("pad_mode").asText()
 
     /** Fraction of a window shared with its neighbour; informational. */
@@ -105,6 +117,10 @@ class ModelSpec(json: String) {
         require(stepPx % stride == 0) {
             "step_px $stepPx is not a multiple of stride $stride, so windows " +
                 "would land between output pixels"
+        }
+        require(edgeWindows == "flush") {
+            "this plugin only implements flush edge windows, sidecar says " +
+                "'$edgeWindows'"
         }
         require(padMode == "reflect") {
             "this plugin only implements reflect padding, sidecar says '$padMode'"

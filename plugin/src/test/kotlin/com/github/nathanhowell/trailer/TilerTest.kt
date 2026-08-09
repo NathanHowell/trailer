@@ -55,19 +55,30 @@ class TilerTest {
             val n = c["n"].intValue()
             val tile = c["tile"].intValue()
             val step = c["step"].intValue()
-            val pad = Tiler.padAmount(n, tile, step)
-            assertEquals(c["pad"].intValue(), pad, "padAmount(n=$n, tile=$tile, step=$step)")
+            val stride = c["stride"].intValue()
+            val pad = Tiler.padAmount(n, tile)
+            assertEquals(c["pad"].intValue(), pad, "padAmount(n=$n, tile=$tile)")
 
             val expected = IntArray(c["origins"].size()) { c["origins"][it].intValue() }
-            val actual = Tiler.origins(n + pad, tile, step)
+            val actual = Tiler.origins(n + pad, tile, step, stride)
             assertEquals(expected.toList(), actual.toList(),
-                "origins(n=$n, tile=$tile, step=$step)")
+                "origins(n=$n, tile=$tile, step=$step, stride=$stride)")
 
-            // The point of padding: the last window must land exactly on the end.
-            if (actual.isNotEmpty()) {
-                assertEquals(n + pad, actual.last() + tile,
-                    "windows do not cover the padded axis for n=$n")
-            }
+            // No window may read past the end. This is the invariant the mirror
+            // seam broke: the old rule let the last window overhang into
+            // reflected ground, and the model drew a trail along it.
+            val end = actual.last() + tile
+            assertTrue(end <= n + pad,
+                "the last window reads past the end of a $n px axis")
+            assertTrue(n + pad - end < stride,
+                "the last window strands ${n + pad - end} px of a $n px axis")
+
+            // Every output pixel is under some window, so pulling the last one
+            // back cannot leave a hole where padding used to be.
+            val covered = actual.flatMap { (it / stride) until (it / stride + tile / stride) }
+            assertEquals(((n + pad) / stride).let { 0 until it }.toList(),
+                covered.distinct().sorted(),
+                "coverage gap on a $n px axis")
         }
     }
 
@@ -101,7 +112,8 @@ class TilerTest {
             Tiler.Window(b["windows"][it]["row"].intValue(), b["windows"][it]["col"].intValue())
         }
         val actual = Tiler.windows(
-            b["h"].intValue(), b["w"].intValue(), b["tile"].intValue(), b["step"].intValue()
+            b["h"].intValue(), b["w"].intValue(), b["tile"].intValue(),
+            b["step"].intValue(), 1
         )
         assertEquals(expected, actual, "window layout")
     }
@@ -117,7 +129,7 @@ class TilerTest {
         val w = 24
         val blender = Tiler.Blender(h, w, tile, goldenTaper())
         val flat = FloatArray(tile * tile) { 0.375f }
-        for (win in Tiler.windows(h, w, tile, step)) blender.add(flat, win.row, win.col)
+        for (win in Tiler.windows(h, w, tile, step, 1)) blender.add(flat, win.row, win.col)
         val out = blender.result()
         assertClose(FloatArray(h * w) { 0.375f }, out, 1e-5f, "constant field")
     }

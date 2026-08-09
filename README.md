@@ -33,10 +33,10 @@ level with the within-tile validation band. Lifecycle transfers. Faint is the
 class with a real spread: `dem1` median 0.484 over four unseen AOIs, but 0.133
 at the low end. See `trailer-360`.
 
-The control tile with zero trail pixels (`north_guard`) keeps false positives
-low for both variants — `fp_rate@0.5` 0.00069 `dem1`, 0.00018 `lidar05` — but
-**100%** of `dem1`'s sit in the outer four pixels of the tile, which is a
-tiling artefact rather than terrain confusion. See `trailer-c02`.
+The control tile with zero trail pixels (`north_guard`) now scores
+`fp_rate@0.5` of exactly **0.00000** for both variants. It read 0.00069 until
+the tiling bug described under Deployment was fixed, and every false-positive
+rate published before that was inflated by it.
 
 Harvesting was the point of that build, and it worked. Trainable labels went
 from 34.2 km active / 0.98 faint / 0.00 lifecycle to **69.7 / 65.2 / 98.9** — a
@@ -347,6 +347,18 @@ axis faint trails fail on.
 Inference blends 50%-overlapping windows under a 2-D Hann taper, with optional
 D4 test-time augmentation — nearly free accuracy at 8× the compute.
 
+The last window on each axis is pulled back flush against the far edge rather
+than hanging off a padded one, and this is not tidiness. Reflect-padding the
+ragged tail put a mirror seam one window-edge away from real output, and a
+mirrored hillslope is a symmetric V a few metres across — the tread
+cross-section the model exists to find. It fired on it every time: **100%** of
+the trail-free control tile's predictions above 0.5 sat in the outer four
+output pixels, against an interior rate of zero, and every published
+`fp_rate@0.5` was inflated by it. Cropping the padding off the output never
+helped, because the damage was done to the input the window read. Padding now
+survives only for a viewport smaller than a single window, where there is no
+real ground left to hand the model.
+
 ## Deployment
 
 `trailer export --variant dem1` freezes one bare-earth variant to ONNX:
@@ -361,9 +373,10 @@ The taper is a graph output rather than something the plugin computes, and
 `--tta` bakes the D4 average into the graph rather than exposing a flag: both
 are cases of the same rule, that anything the plugin would otherwise
 reimplement lives behind the ONNX boundary. Numbers the plugin needs in order
-to tile — stride, step, pad mode — are in the sidecar JSON as numbers, read
-rather than re-derived. Prose in that sidecar is how the two once came to
-disagree about the window step.
+to tile — stride, step, edge-window rule, pad mode — are in the sidecar JSON as
+numbers, read rather than re-derived, and `ModelSpec` refuses a sidecar that
+omits any of them rather than assuming the older rule. Prose in that sidecar is
+how the two once came to disagree about the window step.
 
 The window is fixed rather than dynamic. That is a real constraint of the
 architecture, not an export limitation — a ResNet-34 U-Net needs its input
@@ -376,10 +389,13 @@ stems' BatchNorm. The one op with no ONNX equivalent is the median filter;
 k = 3, 4, 10, 20, including the lower-median convention for even k. A round trip
 through onnxruntime on real elevation matches torch to 2.7e-6.
 
-The plugin's whole-raster path — reflect-pad, tile, run, blend, crop — is
-checked end to end against `infer.predict` on the same weights, not step by
-step: **3.9e-7** across a finished raster, where shifting one window by a single
-column moves it by **1.0**. The fixture runs a 2.6 KB stand-in graph rather than
+The plugin's whole-raster path — tile, run, blend, crop — is checked end to end
+against `infer.predict` on the same weights, not step by
+step: **3.0e-7** across a finished raster, where shifting one window by a single
+column moves it by **1.0**. Both fixture rasters are ragged on both axes, so the
+flush final window is inside the compared region: the tail is the part the two
+implementations have already disagreed about once, and an exact-fit raster would
+exercise neither rule. The fixture runs a 2.6 KB stand-in graph rather than
 the 99 MB trained one, since what is under test is the tiling and the session
 plumbing, and it covers a stride-2 variant as well as the deployable stride-1
 one so the body-grid division is exercised by something.

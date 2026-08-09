@@ -74,8 +74,11 @@ class Inference(
         val step = spec.stepPx
         val stride = spec.stride
 
-        val padH = Tiler.padAmount(height, tile, step)
-        val padW = Tiler.padAmount(width, tile, step)
+        // Only a viewport smaller than one window is padded now; a ragged tail
+        // is covered by a flush final window, which reads real ground instead
+        // of a mirror of it. See [Tiler.origins].
+        val padH = Tiler.padAmount(height, tile)
+        val padW = Tiler.padAmount(width, tile)
         // Reflection cannot extend a run by more than its own length, in torch
         // or here. A raster this small is a caller error rather than something
         // to paper over, and saying so beats a confusing failure inside the pad.
@@ -102,7 +105,7 @@ class Inference(
         var blender: Tiler.Blender? = null
         val crop = FloatArray(tile * tile)
 
-        for (win in Tiler.windows(paddedH, paddedW, tile, step)) {
+        for (win in Tiler.windows(paddedH, paddedW, tile, step, stride)) {
             for (r in 0 until tile) {
                 System.arraycopy(padded, (win.row + r) * paddedW + win.col,
                                  crop, r * tile, tile)

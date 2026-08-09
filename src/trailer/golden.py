@@ -23,16 +23,22 @@ log = logging.getLogger(__name__)
 
 DEFAULT_OUT = Path("plugin/src/test/resources/golden.json")
 
-#: Cases chosen to cover the branches that actually differ: a raster shorter
-#: than one window, an exact fit, and a ragged tail needing Python's
-#: negative-modulo behaviour (which Kotlin's `rem` does not reproduce).
-PAD_CASES = ((100, 64, 32), (64, 64, 32), (50, 64, 32), (129, 64, 32),
-             (1121, 256, 128), (200, 128, 64), (65, 64, 32))
+#: Tiling cases as ``(n, tile, step, stride)``, chosen to cover the branches
+#: that actually differ: a raster shorter than one window (the only case still
+#: padded), an exact fit, a ragged tail whose flush origin is not a multiple of
+#: the step, and stride 2, where that origin is quantised down and so is *not*
+#: simply ``n - tile``.
+PAD_CASES = ((100, 64, 32, 1), (64, 64, 32, 1), (50, 64, 32, 1),
+             (129, 64, 32, 1), (1121, 256, 128, 1), (200, 128, 64, 1),
+             (65, 64, 32, 1), (1121, 512, 256, 2), (2242, 512, 152, 2),
+             (300, 128, 64, 2))
 
 #: Whole-tile parity cases: (variant, body tile, raster height, raster width).
 #:
-#: Both rasters are ragged on both axes, so the reflect-padded tail is inside
-#: the compared region rather than off the end of it. ``dem1`` is the case that
+#: Both rasters are ragged on both axes, so the flush final window -- the one
+#: that is *not* a multiple of the step -- is inside the compared region rather
+#: than off the end of it. That is the window the old padded rule got wrong, and
+#: an exact-fit raster would exercise neither rule. ``dem1`` is the case that
 #: ships. ``lidar05`` is stride 2, where a window origin has to be divided down
 #: to the body grid -- the arithmetic that a Kotlin-only test would have had no
 #: way to check, and the exact shape of the step bug this project already found
@@ -160,7 +166,7 @@ def _tile_case(variant: str, body: int, h: int, w: int, out_dir: Path,
         "input_px": tile, "output_px": body, "stride": v.stride,
         "overlap": overlap,
         "step_px": infer.window_step(tile, overlap, v.stride),
-        "pad_mode": "reflect", "tta": False,
+        "edge_windows": "flush", "pad_mode": "reflect", "tta": False,
         "outputs": ["trail_probability", "window_taper"],
         "license": model_mod.MODEL_LICENSE,
         "attribution": model_mod.MODEL_ATTRIBUTION,
@@ -189,11 +195,11 @@ def build(out_dir: Path = DEFAULT_OUT.parent) -> dict:
     g["hann"] = infer.hann2d(size, "cpu").flatten().tolist()
 
     g["pad_cases"] = []
-    for n, tile, step in PAD_CASES:
+    for n, tile, step, stride in PAD_CASES:
         pad = infer._pad_to(n, tile, step)
         g["pad_cases"].append({
-            "n": n, "tile": tile, "step": step, "pad": pad,
-            "origins": list(range(0, (n + pad) - tile + 1, step)),
+            "n": n, "tile": tile, "step": step, "stride": stride, "pad": pad,
+            "origins": infer.window_origins(n + pad, tile, step, stride),
         })
 
     # Bottom/right reflect padding on a deliberately asymmetric ramp -- a
@@ -210,8 +216,8 @@ def build(out_dir: Path = DEFAULT_OUT.parent) -> dict:
     taper = infer.hann2d(tile, "cpu").numpy()
     acc = np.zeros((H, W), dtype="float64")
     den = np.zeros((H, W), dtype="float64")
-    wins = [(r, c) for r in range(0, H - tile + 1, step)
-            for c in range(0, W - tile + 1, step)]
+    wins = [(r, c) for r in infer.window_origins(H, tile, step, 1)
+            for c in infer.window_origins(W, tile, step, 1)]
     probs = []
     rr, cc = np.meshgrid(np.arange(tile), np.arange(tile), indexing="ij")
     for i, (r, c) in enumerate(wins):

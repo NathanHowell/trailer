@@ -303,6 +303,16 @@ def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256,
         "stride": v.stride,
         "overlap": overlap,
         "step_px": infer.window_step(n, overlap, v.stride),
+        # How the ragged tail is covered. "flush" means the last window along
+        # each axis starts at the largest multiple of `stride` that keeps it
+        # inside the raster, so no window ever reads a manufactured pixel. The
+        # alternative this replaced -- extending the raster and letting a window
+        # hang off the end -- put a mirror seam beside real output, and the
+        # model read the mirrored hillslope as a tread and drew a trail along
+        # the bottom and right edge of every raster.
+        "edge_windows": "flush",
+        # Reachable only for a viewport smaller than one window, where there is
+        # no real ground left to read.
         "pad_mode": "reflect",
         # Baked into the graph at export time, not switchable at runtime: ONNX
         # cannot branch on it, and shipping both graphs would double what a

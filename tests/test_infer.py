@@ -66,11 +66,65 @@ def test_window_step_quantises_to_the_stride():
     assert infer.window_step(512, 1.0, 2) == 2        # never zero
 
 
-def test_pad_to_covers_the_ragged_tail():
-    for n, tile, step in ((100, 64, 32), (64, 64, 32), (50, 64, 32), (129, 64, 32)):
-        pad = infer._pad_to(n, tile, step)
-        padded = n + pad
-        assert padded >= tile
-        assert (padded - tile) % step == 0
-        # Every input row is inside some window.
-        assert padded - step < max(n, tile) + step
+def test_pad_to_only_fires_below_one_window():
+    # A ragged tail is no longer padded -- the last window is pulled flush
+    # against it instead. All that is left for padding is a raster too small to
+    # hold a single window, where there is nothing else to hand the model.
+    for n, tile, step in ((100, 64, 32), (64, 64, 32), (129, 64, 32)):
+        assert infer._pad_to(n, tile, step) == 0, (n, tile)
+    assert infer._pad_to(50, 64, 32) == 14
+    assert infer._pad_to(1, 64, 32) == 63
+
+
+# Rasters at least one window across, at every stride the variant table has,
+# ragged and exact.
+_AXES = ((1121, 256, 128, 1), (1121, 512, 256, 2), (256, 256, 128, 1),
+         (300, 128, 64, 1), (129, 64, 32, 1), (2242, 512, 152, 2))
+
+
+def test_no_window_reads_a_pixel_that_is_not_there():
+    """The last window sits flush against the far edge, not off the end of it.
+
+    Reflect-padding the tail and letting a window hang over it manufactures a
+    mirror seam, and a mirrored hillslope is a symmetric V a few metres wide --
+    which is the tread cross-section the model is trained to fire on. Measured
+    on runs/full-b/best.pt: 100% of the control tile's false positives sat in
+    the outer four body pixels, and cropping the raster to a size needing no
+    padding took the bottom rows from 0.22 mean probability to 0.00.
+
+    So the invariant is not "the padding is cropped off the output" -- it was,
+    and the frame was there anyway. It is that no window ever *reads* an
+    invented pixel.
+    """
+    for n, tile, step, stride in _AXES:
+        origins = infer.window_origins(n, tile, step, stride)
+        assert origins[0] == 0, (n, tile, step, stride)
+        # Flush, up to the stride quantisation: what the last window leaves
+        # uncovered is less than one input pixel per body pixel, so no body
+        # pixel is stranded (which the coverage test below states directly).
+        assert 0 <= n - (origins[-1] + tile) < stride, (n, tile, step, stride)
+        assert all(o % stride == 0 for o in origins), (n, tile, step, stride)
+        assert origins == sorted(set(origins)), (n, tile, step, stride)
+
+
+def test_every_body_pixel_falls_under_some_window():
+    # A flush final window is only safe if pulling it back does not strand the
+    # rows the regular stride would have reached.
+    for n, tile, step, stride in _AXES:
+        covered = set()
+        for o in infer.window_origins(n, tile, step, stride):
+            covered.update(range(o // stride, o // stride + tile // stride))
+        assert covered == set(range(n // stride)), (n, tile, step, stride)
+
+
+def test_window_origins_pins_the_known_cases():
+    # The plugin reimplements this rule, so the values are pinned here as well
+    # as carried into golden.json.
+    assert infer.window_origins(1121, 256, 128, 1) == [
+        0, 128, 256, 384, 512, 640, 768, 865]
+    assert infer.window_origins(256, 256, 128, 1) == [0]
+    # Shorter than one window: padded up, and the single window starts at zero.
+    assert infer.window_origins(200, 256, 128, 1) == [0]
+    # Stride 2, ragged: the flush origin is quantised down to the stride so it
+    # still lands on a body pixel.
+    assert infer.window_origins(1121, 512, 256, 2) == [0, 256, 512, 608]

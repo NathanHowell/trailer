@@ -53,8 +53,45 @@ def _d4_inv(x: torch.Tensor, k: int, flip: bool) -> torch.Tensor:
 
 
 def _pad_to(n: int, tile: int, step: int) -> int:
-    """Extra rows/cols so windows of ``tile`` tile the axis exactly."""
-    return max(tile - n, 0) + (-(n - tile) % step if n > tile else 0)
+    """Extra rows/cols so windows of ``tile`` tile the axis exactly.
+
+    Only reachable now for a raster narrower than a single window, where there
+    is nothing to do but invent pixels. ``step`` no longer enters it: the ragged
+    tail is handled by pulling the last window flush against the far edge --
+    see :func:`window_origins` -- rather than by extending the axis to meet a
+    window that hangs off the end.
+    """
+    return max(tile - n, 0)
+
+
+def window_origins(n: int, tile: int, step: int, stride: int) -> list[int]:
+    """Window origins along one axis of an ``n`` pixel raster, in input pixels.
+
+    Stepped by ``step`` from zero, with the last window pulled back flush
+    against the far edge instead of hanging off a padded one.
+
+    This is not a tidiness preference. Reflect-padding the tail put a mirror
+    seam one window-edge away from real output, and a mirrored hillslope is a
+    symmetric V a few metres across -- the tread cross-section the model exists
+    to find. It fired on it every time: on ``runs/full-b/best.pt`` at ``dem1``,
+    **100%** of the trail-free control tile's predictions above 0.5 sat in the
+    outer four body pixels, against an interior rate of zero, and re-cropping
+    the same raster to a size needing no padding took the bottom rows from 0.22
+    mean probability to 0.00. The padding was already cropped off the *output*;
+    that never helped, because the damage was done to the *input* the window
+    read.
+
+    The flush origin is quantised down to ``stride`` for the same reason
+    :func:`window_step` is: an origin between output pixels misregisters the
+    whole window by half a body pixel. Quantising down rather than up cannot
+    strand the tail -- ``n // stride`` body pixels are covered exactly, since
+    the leftover is by construction less than one body pixel.
+
+    Emitted into the export sidecar as a rule the plugin follows, not
+    re-derived there; ``Tiler.origins`` is checked against these values.
+    """
+    last = max(((n - tile) // stride) * stride, 0)
+    return sorted({*range(0, last + 1, step), last})
 
 
 def window_step(tile: int, overlap: float, stride: int) -> int:
@@ -99,8 +136,12 @@ def predict(model, z: np.ndarray, canopy: np.ndarray | None = None,
     step = window_step(tile, overlap, stride)
     pad_h, pad_w = _pad_to(h, tile, step), _pad_to(w, tile, step)
 
-    # Reflect-pad so windows tile exactly and edges keep real context. NaN
-    # nodata reflects harmlessly -- the model's centring step drops it anyway.
+    # Reflect-padding survives only for a raster smaller than one window, where
+    # the model has to be handed something and there is no real ground to hand
+    # it. Everywhere else the tail is covered by a flush final window instead --
+    # a mirror seam beside real output is a manufactured trail, see
+    # `window_origins`. NaN nodata reflects harmlessly either way: the model's
+    # centring step drops it.
     t = torch.from_numpy(z).unsqueeze(0)
     cn = torch.from_numpy(canopy).unsqueeze(0) if v.canopy else None
     if pad_h or pad_w:
@@ -116,8 +157,8 @@ def predict(model, z: np.ndarray, canopy: np.ndarray | None = None,
     acc = torch.zeros((1, 1, H // stride, W // stride), device=device)
     den = torch.zeros_like(acc)
 
-    origins = [(r, c) for r in range(0, H - tile + 1, step)
-               for c in range(0, W - tile + 1, step)]
+    origins = [(r, c) for r in window_origins(H, tile, step, stride)
+               for c in window_origins(W, tile, step, stride)]
     d4 = [(k, f) for f in (False, True) for k in range(4)] if tta else [(0, False)]
 
     for i in range(0, len(origins), batch):

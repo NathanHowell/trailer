@@ -40,22 +40,46 @@ object Tiler {
     // carries the number `infer.window_step` produced at export time.
 
     /**
-     * Padding needed on one axis so windows tile it exactly.
+     * Padding needed on one axis so it can hold a single window.
      *
-     * Mirrors `_pad_to`. Note Python's `%` on a negative left operand returns a
-     * non-negative result; Kotlin's `rem` does not, so this uses `mod`.
+     * Mirrors `_pad_to`. A ragged tail is no longer padded: it is covered by a
+     * flush final window instead, see [origins]. All that is left here is a
+     * viewport smaller than one window, where there is no real ground to read.
      */
-    fun padAmount(n: Int, tile: Int, step: Int): Int {
-        val short = max(tile - n, 0)
-        val ragged = if (n > tile) (-(n - tile)).mod(step) else 0
-        return short + ragged
-    }
+    fun padAmount(n: Int, tile: Int): Int = max(tile - n, 0)
 
-    /** Window origins along one axis, after padding. */
-    fun origins(padded: Int, tile: Int, step: Int): IntArray {
-        if (padded < tile) return IntArray(0)
-        val n = (padded - tile) / step + 1
-        return IntArray(n) { it * step }
+    /**
+     * Window origins along one axis of an `n` pixel raster, in input pixels.
+     *
+     * Stepped by `step` from zero, with the last window pulled back flush
+     * against the far edge rather than hanging off a padded one.
+     *
+     * The previous rule extended the axis by reflection and let the final
+     * window overhang. That put a mirror seam one window-edge away from real
+     * output, and a mirrored hillslope is a symmetric V a few metres across --
+     * the tread cross-section the model is trained to find. It fired on it
+     * every time: on the trail-free control tile, *every* prediction above 0.5
+     * sat in the outer four output pixels, against an interior rate of zero.
+     * Cropping the padding off the output never helped, because the damage was
+     * done to the input the window read.
+     *
+     * The flush origin is quantised down to `stride` for the same reason
+     * [ModelSpec.stepPx] is a multiple of it: an origin between output pixels
+     * misregisters the whole window by half an output pixel. Quantising down
+     * strands nothing -- the leftover is by construction less than one output
+     * pixel wide.
+     *
+     * Checked against `infer.window_origins` in `TilerTest`, not against this
+     * file's own idea of the rule.
+     */
+    fun origins(n: Int, tile: Int, step: Int, stride: Int): IntArray {
+        if (n < tile) return IntArray(0)
+        val last = ((n - tile) / stride) * stride
+        val stepped = last / step + 1
+        // `last` coincides with the final stepped origin whenever the tail is
+        // not ragged; emitting it twice would double-weight that window.
+        val extra = if ((stepped - 1) * step == last) 0 else 1
+        return IntArray(stepped + extra) { if (it < stepped) it * step else last }
     }
 
     /**
@@ -87,9 +111,10 @@ object Tiler {
     /** A window's origin in the padded input grid. */
     data class Window(val row: Int, val col: Int)
 
-    fun windows(paddedH: Int, paddedW: Int, tile: Int, step: Int): List<Window> {
-        val rows = origins(paddedH, tile, step)
-        val cols = origins(paddedW, tile, step)
+    fun windows(paddedH: Int, paddedW: Int, tile: Int, step: Int,
+                stride: Int): List<Window> {
+        val rows = origins(paddedH, tile, step, stride)
+        val cols = origins(paddedW, tile, step, stride)
         val out = ArrayList<Window>(rows.size * cols.size)
         for (r in rows) for (c in cols) out.add(Window(r, c))
         return out

@@ -61,7 +61,7 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"old","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
-                 "step_px":128,"pad_mode":"reflect","tta":false,
+                 "step_px":128,"edge_windows":"flush","pad_mode":"reflect","tta":false,
                  "outputs":["trail_probability"],$LICENCE}
             """.trimIndent())
         }
@@ -78,7 +78,7 @@ class ModelSpecTest {
         val strideTwo = ModelSpec("""
             {"variant":"future05","res_m":0.5,"out_res_m":1.0,
              "input_px":512,"output_px":256,"stride":2,"overlap":0.7,
-             "step_px":152,"pad_mode":"reflect","tta":false,
+             "step_px":152,"edge_windows":"flush","pad_mode":"reflect","tta":false,
              "outputs":["trail_probability","window_taper"],$LICENCE}
         """.trimIndent())
         assertEquals(152, strideTwo.stepPx, "the number Python computed, unmodified")
@@ -99,7 +99,7 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":0.5,"out_res_m":1.0,
                  "input_px":500,"output_px":256,"stride":2,"overlap":0.5,
-                 "step_px":250,"pad_mode":"reflect","tta":false,
+                 "step_px":250,"edge_windows":"flush","pad_mode":"reflect","tta":false,
                  "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
@@ -115,7 +115,7 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":0.5,"out_res_m":1.0,
                  "input_px":512,"output_px":256,"stride":2,"overlap":0.7,
-                 "step_px":153,"pad_mode":"reflect","tta":false,
+                 "step_px":153,"edge_windows":"flush","pad_mode":"reflect","tta":false,
                  "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
@@ -128,11 +128,30 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
-                 "step_px":128,"pad_mode":"replicate","tta":false,
+                 "step_px":128,"edge_windows":"flush","pad_mode":"replicate",
+                 "tta":false,
                  "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
         assertTrue(e.message!!.contains("replicate"), e.message!!)
+    }
+
+    @Test
+    fun `refuses an edge-window rule it does not implement`() {
+        // The rule this replaced -- pad the tail, let the last window overhang
+        // -- made the model read the mirror seam as a tread and draw a trail
+        // along the bottom and right of every raster. Weights exported for that
+        // rule must not be tiled by this one silently, in either direction.
+        val e = assertFailsWith<IllegalArgumentException> {
+            ModelSpec("""
+                {"variant":"bad","res_m":1.0,"out_res_m":1.0,
+                 "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
+                 "step_px":128,"edge_windows":"pad","pad_mode":"reflect",
+                 "tta":false,
+                 "outputs":["trail_probability","window_taper"],$LICENCE}
+            """.trimIndent())
+        }
+        assertTrue(e.message!!.contains("pad"), e.message!!)
     }
 
     @Test
@@ -168,7 +187,7 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":0.5,
-                 "step_px":128,"pad_mode":"reflect","tta":false,
+                 "step_px":128,"edge_windows":"flush","pad_mode":"reflect","tta":false,
                  "outputs":["trail_probability","window_taper"],
                  "license":"CC-BY-SA-4.0","attribution":"  "}
             """.trimIndent())
@@ -182,7 +201,7 @@ class ModelSpecTest {
             ModelSpec("""
                 {"variant":"bad","res_m":1.0,"out_res_m":1.0,
                  "input_px":256,"output_px":256,"stride":1,"overlap":1.0,
-                 "step_px":0,"pad_mode":"reflect","tta":false,
+                 "step_px":0,"edge_windows":"flush","pad_mode":"reflect","tta":false,
                  "outputs":["trail_probability","window_taper"],$LICENCE}
             """.trimIndent())
         }
