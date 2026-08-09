@@ -19,11 +19,24 @@ checkpoint) is not. Held-out **active/faint** generalises reasonably (`dem1`
 f1@0.5 0.683, active 0.850 — one held-out tile, `junction_pass`). Held-out
 **lifecycle** reads f1@0.5 **0.000** on `abandoned_south`, and that number
 should be discarded rather than believed: the tile's single OSM way was traced
-from a historical topo map (`source=USTopo`), and it has no tread. Cross-
-sections along it, with a quadratic fit to the 2.5–12 m flanks removed so the
-hillslope and the drainage it follows come out, give a centreline residual of
-**−0.1 ± 0.3 cm** against a +0.8 cm random-line null, where tiles the model
-scores 0.4–0.9 on read −2 to −14 cm. There is nothing there to find.
+from a historical topo map (`source=USTopo`), and nothing along it is visible to
+LiDAR in any channel we can measure.
+
+A matched filter for the tread notch and the bench-and-berm, normalised against
+each cross-section's own terrain roughness, spikes at zero offset on the active
+control (+1.1 flank MAD) and on a lifecycle tile the model scores 0.94 on (+2.3).
+On `abandoned_south` it finds **no local peak at any offset from −40 to +40 m** —
+only the broad ramp of the valley side. Re-fetching the point cloud that the
+build evicted and going after the one channel the pipeline never derives,
+**return intensity**, looked at first like a find: a sharp 4 m spike of +1.7
+flank s.d. exactly on the line. Splitting the way by whether the local terrain
+is channel-like puts all of it in the drainage — +1.7 s.d. over 510 channel
+samples, **−0.2 over 765 hillslope samples**. What is bright along that line is
+the creek. Ground-return density, the canopy-gap signature, reads +2.7% against
++22% for the active control and +46% for the faint one.
+
+None of that proves no trail is there on the ground. It does mean this tile
+cannot measure whether the model finds one.
 
 A leave-AOI-out control run settles the question the single tile could not.
 Retraining the same recipe with six lifecycle and four faint AOIs withheld from
