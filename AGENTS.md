@@ -126,3 +126,84 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## Build & Test
+
+PDAL and GDAL are command-line tools, not Python packages — install them with
+the system package manager (`brew install pdal gdal`, or `apt install pdal
+gdal-bin` / conda-forge on Linux).
+
+```bash
+uv sync                        # data pipeline only
+uv sync --extra train          # adds torch, smp, onnx
+uv run pytest tests/ -q        # Python tests
+mvn -f plugin/pom.xml test     # Kotlin plugin tests
+mvn -f plugin/pom.xml package  # shaded jar for JOSM
+
+just retrain                   # full training run
+just report                    # what the last run selected, per class and variant
+```
+
+`uv.lock` resolves for both platforms: the CUDA wheels, NCCL and Triton carry
+`platform_machine == 'x86_64' and sys_platform == 'linux'` markers, so the same
+lock gives MPS on an Apple machine and CUDA on a Linux box with no edits.
+`model.pick_device` prefers CUDA, then MPS, then CPU.
+
+Training state moves between machines: `runs/<name>/last.pt` is written every
+epoch with the optimiser, scheduler and scaler alongside the weights, and
+`trailer train --resume <ckpt>` restores all of it. A checkpoint holding weights
+only is a *warm start* — moments reset, the LR schedule restarts — and the log
+says so rather than pretending it resumed. `data/` and `runs/` are gitignored
+and large (6 GB and 1 GB), so moving a workspace means `rsync`, not `git clone`.
+
+## Architecture Overview
+
+Detect hiking trails in bare-earth LiDAR terrain and show a **probability
+heatmap** a human traces over in JOSM. Never vectors, never an import — OSM has
+well-earned opinions about machine-generated geometry.
+
+- `src/trailer/` — data pipeline (3DEP fetch, PDAL rasterise, OSM labels),
+  training, and ONNX export. `cli.py` is the entry point for every subcommand.
+- `plugin/` — the JOSM plugin in Kotlin, running the exported graph through
+  onnxruntime's Java API.
+
+The model is a ResNet-34 U-Net with **per-variant stems feeding one shared
+trunk** at `BODY_RES = 1.0` m. A variant is a pixel size plus whether canopy
+bands exist; a 0.5 m stem is stride-2 so it can encode the tread before
+decimating. Only `dem1` (1 m, bare earth) exports, because 3DEP cannot supply
+canopy — so **`dem1`'s per-class F1 is the go/no-go signal, not the blend**.
+
+Terrain derivatives are torch layers *inside* the graph, so an exported `.onnx`
+is self-contained: the plugin feeds it one float32 DEM tile and gets
+probabilities back.
+
+See `README.md` for the survey findings, feature bands, label taxonomy and
+deployment detail.
+
+## Conventions & Patterns
+
+**The Python/Kotlin boundary.** Anything the plugin would otherwise reimplement
+goes behind the ONNX boundary one of two ways. *Algorithms go into the graph* —
+terrain derivatives, the D4 test-time average, the Hann taper (emitted as a
+second output). *Numbers go into the export sidecar as numbers, never prose* —
+stride, overlap, `step_px`, `pad_mode`. `ModelSpec.kt` **validates rather than
+defaults**: a missing field is a version mismatch, not a reason to guess.
+
+**Model selection is stratified, never pooled.** The score is the mean over
+(variant × visibility class) of best-threshold relaxed F1 at the 5 m tolerance.
+Pooled recall is length-weighted and would let faint trail — the thing this
+project exists for — disappear into an average.
+
+**Writes that could be interrupted go through `atomic.staged`** — temp file in
+the destination directory, then `os.replace`. A partial download must never
+become a trusted cache.
+
+**Watch a test fail before trusting it.** Mutate the code it covers and confirm
+it bites; several tests here previously asserted their own arithmetic and agreed
+with themselves.
+
+**Never hand-write beads IDs.** Create with `bd create ... --silent`, capture
+the returned ID, use that. See `bd prime` for the rest.
+
+**Commits do not carry `Co-Authored-By` lines.** Signing stays on — if the agent
+refuses, stop and ask, never `--no-gpg-sign`.

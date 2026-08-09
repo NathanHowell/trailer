@@ -11,8 +11,11 @@ overlay a mapper traces over is a different thing entirely.
 
 Data pipeline, survey and training stack are done and run end to end. The
 74-tile build (14 curated + 60 harvested) is complete: 233.8 km of labelled
-trail, 59 of 60 harvested tiles passing `trailer vet`. No model has been trained
-on the full set yet.
+trail, 59 of 60 harvested tiles passing `trailer vet`.
+
+A full-set run is in progress. Numbers here are mid-run and will be replaced by
+held-out figures when it completes — validation F1 is not the honest estimate,
+and the eval-role tiles are deliberately scored only once, at the end.
 
 Harvesting was the point of that build, and it worked. Trainable labels went
 from 34.2 km active / 0.98 faint / 0.00 lifecycle to **69.7 / 65.2 / 98.9** — a
@@ -29,10 +32,22 @@ normalisation constants sealed in alongside the weights.
 PDAL and GDAL are used as command-line tools, not Python packages:
 
 ```sh
-brew install pdal gdal
+brew install pdal gdal            # macOS
+sudo apt install pdal gdal-bin    # Debian/Ubuntu; or conda-forge
+
 uv sync                 # data pipeline
 uv sync --extra train   # adds torch, segmentation-models-pytorch, onnx
 ```
+
+The lock file resolves for both platforms — the CUDA wheels, NCCL and Triton
+carry `platform_machine == 'x86_64' and sys_platform == 'linux'` markers — so
+the same `uv.lock` gives MPS on Apple silicon and CUDA on a Linux x86_64 box
+with no edits. `pick_device` prefers CUDA, then MPS, then CPU.
+
+`data/` and `runs/` are gitignored and large (~6 GB and ~1 GB), so moving a
+workspace to another machine means `rsync`, not `git clone`. Training state
+travels: `runs/<name>/last.pt` carries the optimiser and LR schedule, and
+`trailer train --resume` restores them.
 
 Inference in JOSM goes through ONNX Runtime's Java API, so torch is an optional
 extra rather than a dependency. Export needs `onnx` only — not `onnxscript`,
