@@ -296,6 +296,18 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
                 with autocast():
                     logits, y, w, _ = _forward(net, batch, v.key, device)
                     loss, parts = criterion(logits, y, w, ramp=ramp)
+                # Yes, this is a device-to-host copy in the inner loop, and no,
+                # sampling it every Nth step is not available. A single NaN
+                # gradient makes clip_grad_norm_ return NaN, which poisons every
+                # gradient, then the weights and AdamW's moments -- unrecoverable
+                # rather than merely detected late. Under --amp bf16 the
+                # GradScaler is disabled, so this is the only guard there is.
+                # Measured cost on CUDA: syncing once per step is 3.6%, and
+                # syncing five times costs the same as once, because the price is
+                # the drain and not the call. Removing the other .item() calls
+                # while this one stays therefore buys exactly nothing -- measured
+                # at 1.00x, see trailer-440.27. The loop is launch-bound, not
+                # sync-bound; trailer-440.28 has where the time actually goes.
                 if not math.isfinite(loss.item()):
                     log.warning("non-finite loss on %s, skipping", v.key)
                     continue
