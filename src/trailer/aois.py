@@ -29,6 +29,14 @@ class Aoi:
     notes: str = ""
     # Set when the tile needs special handling during raster build.
     flags: frozenset[str] = field(default_factory=frozenset)
+    #: Why this tile's score is not evidence, or "" if it is.
+    #:
+    #: A reason rather than a boolean, and carried beside the number rather
+    #: than filtering it out, because a held-out tile that quietly disappears
+    #: from a report is worse than one that argues for itself: the next reader
+    #: re-derives the number, believes it, and puts it in a release note. Every
+    #: consumer that prints held-out scores prints this next to them.
+    advisory: str = ""
 
     @property
     def slug(self) -> str:
@@ -92,7 +100,22 @@ AOIS: tuple[Aoi, ...] = (
               "NOT by a lifecycle prefix: this tile has zero lifecycle ways."),
     Aoi("abandoned_south", "Abandoned trail (Kern side)", 36.42955, -118.43660,
         role="eval",
-        notes="Paired abandoned:highway=path and active path."),
+        notes="2679 m, 45% canopy, 20.2 ground/m2 (second densest in the set), "
+              "138 m relief. Holds exactly ONE way: 1.31 km of "
+              "abandoned:highway=path, w/1498594057, traced from a historical "
+              "topo map -- changeset 181381229 declares source='USTopo; USGS "
+              "3D Elevation Program'. No active path, despite what this note "
+              "used to claim.",
+        advisory="nothing along this way is visible to LiDAR in any channel "
+                 "measured: a matched filter for the tread notch and the "
+                 "bench-and-berm finds no local peak anywhere in +/-40 m, "
+                 "where it reads +1.1 flank MAD at zero offset on "
+                 "junction_pass active; ground-return density reads +2.7% "
+                 "on-line against +22% there; and the one sharp intensity "
+                 "spike on the line sits entirely in the drainage the way "
+                 "follows (+1.7 flank s.d. over 510 channel sections, -0.2 "
+                 "over 765 hillslope ones). Scoring abandoned-trail recall "
+                 "here measures the label, not the model"),
 
     # ---- control -----------------------------------------------------------
     Aoi("north_guard", "North Guard (control)", 36.75154, -118.48835,
@@ -123,6 +146,16 @@ def all_aois(harvest: bool = True) -> tuple[Aoi, ...]:
 
 
 BY_KEY: dict[str, Aoi] = {a.key: a for a in AOIS}
+
+
+def advisory(key: str) -> str:
+    """Why ``key``'s score is not evidence, or "" if it is (or is unknown).
+
+    Returns "" for a key that is not in the registry rather than raising: a
+    caller holding a directory name should not be the thing that fails when a
+    tile is built from a registry it has since dropped out of.
+    """
+    return BY_KEY[key].advisory if key in BY_KEY else ""
 
 
 def select(keys: str | None = None, role: str | None = None,

@@ -28,6 +28,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from . import aois as aoi_mod
 from . import infer, metrics, model as model_mod, osm
 from .data import TileDataset, full_tile
 from .losses import TrailLoss
@@ -205,9 +206,14 @@ def evaluate_tiles(net, dirs: list[Path], variants, res: float, device,
             rec["ap"] = round(metrics.average_precision(prob, y, w), 4)
             rec["fp_rate@0.5"] = round(metrics.false_positive_rate(prob, w), 5)
             rec["positive_frac"] = round(float((y > 0).mean()), 5)
+            # Travels beside the number, into report.json, so a reader who
+            # never opens aois.py still cannot mistake this tile's score for
+            # evidence. See Aoi.advisory.
+            rec["advisory"] = aoi_mod.advisory(d.name)
             out.setdefault(v.key, {})[d.name] = rec
-            log.info("%-9s %-22s f1@0.5=%.3f ap=%.3f fp=%.4f", v.key, d.name,
-                     rec["f1@0.5"], rec["ap"], rec["fp_rate@0.5"])
+            log.info("%-9s %-22s f1@0.5=%.3f ap=%.3f fp=%.4f%s", v.key, d.name,
+                     rec["f1@0.5"], rec["ap"], rec["fp_rate@0.5"],
+                     "  ADVISORY, not evidence" if rec["advisory"] else "")
     return out
 
 

@@ -85,6 +85,8 @@ report path=(run / "report.json"):
             print(f"  {v:8s} {name:18s} fp={rec['fp_rate@0.5']:.5f} " +
                   " ".join(f"{c}={by[c]['f1']:.3f}"
                            for c in rec["strat"]["classes"]))
+            if rec.get("advisory"):
+                print(f"  {'':8s} {'':18s} ^ NOT EVIDENCE: {rec['advisory']}")
     PY
 
 # ---------------------------------------------------------------- corpus

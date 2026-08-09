@@ -345,8 +345,15 @@ boundary placed by label quantile rather than at a fixed fraction of width —
 trails cluster, and a fixed cut can hand validation a strip containing no trail
 at all. The eval-role tiles (abandoned trails) and the control tile are scored
 once at the end of a run, on full tiles with sliding-window inference. They are
-a test set; selecting on them would spend the only honest estimate of
-abandoned-trail recall and false-positive rate that exists.
+a test set; selecting on them would spend the only honest estimate of held-out
+recall and false-positive rate that exists.
+
+An AOI can carry an `advisory`: a sentence saying why its score is not evidence,
+which travels into `report.json` beside the number and is printed under it by
+both `trailer train` and `just report`. `abandoned_south` carries one. The
+number is not filtered out, because a held-out tile that quietly vanishes from a
+report is worse than one that argues for itself — the next reader re-derives it,
+believes it, and puts it in a release note. Which is roughly what happened.
 
 **Augmentation** is limited to transforms needing no interpolation. D4 — the
 eight dihedral transforms — is a pure array permutation, and terrain has no

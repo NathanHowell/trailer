@@ -226,6 +226,8 @@ def cmd_train(args) -> int:
                   f"fp {rec['fp_rate@0.5']:.5f}  " +
                   " ".join(f"{c[:4]} {by[c]['f1']:.3f}" for c in
                            rec["strat"]["classes"]))
+            if rec.get("advisory"):
+                print(f"      ^ NOT EVIDENCE: {rec['advisory']}")
     return 0
 
 
