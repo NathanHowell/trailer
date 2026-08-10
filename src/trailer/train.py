@@ -188,6 +188,33 @@ def validate(net, loader, criterion, variant: str, res: float, device) -> dict:
     return out | {"strat": strat.result()}
 
 
+def selection_score(val_stats: dict) -> tuple[float, float, list[float]]:
+    """Which epoch to keep: the deployable variants' stratified F1.
+
+    A canopy-bearing variant cannot be exported -- ``export_onnx`` refuses it,
+    because no raster elevation service supplies the bands -- so letting it vote
+    picks the epoch that was best for a model nobody will ever run. It still
+    trains, and its gradients still shape the shared trunk; it just does not get
+    a say in which checkpoint survives.
+
+    Measured on runs/full-b before the change: the old all-variant rule cost
+    0.0004 dem1 F1 at the chosen epoch and never once promoted an epoch where
+    dem1 had got worse. This is cleanup, not a fix. See trailer-440.24.
+
+    Returns ``(score, score_all, deployable)``. ``score_all`` is the old
+    quantity, kept so runs either side of this change stay comparable; it is
+    also the fallback when nothing here is deployable, which is a real
+    configuration -- a lidar05-only run has to select on something.
+    """
+    from . import variants as var_mod
+
+    score_all = float(np.mean([s["strat"]["score"] for s in val_stats.values()]))
+    deployable = [s["strat"]["score"] for v, s in val_stats.items()
+                  if not var_mod.get(v).canopy]
+    return (float(np.mean(deployable)) if deployable else score_all,
+            score_all, deployable)
+
+
 def evaluate_tiles(net, dirs: list[Path], variants, res: float, device,
                    cfg) -> dict:
     """Full-tile sliding-window scoring, per variant. Used for the held-out set.
@@ -345,15 +372,19 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
                        for vk, r in running.items()}
         val_stats = {v.key: validate(net, loaders[v.key][1], criterion,
                                      v.key, res, device) for v in variants}
-        # Mean over (variant x visibility class) of best-threshold relaxed F1.
+        # Mean over visibility class of best-threshold relaxed F1, on the
+        # variants that can actually deploy.
         #
-        # Across variants, because optimising for the 0.5 m path alone would
-        # quietly let the deployable 1 m one rot, and it is the 1 m path a JOSM
-        # reviewer actually meets. Across classes, because pooled recall is
-        # length-weighted and would let faint trail -- the thing this project is
-        # for -- be traded away for more of what we already detect.
-        score = float(np.mean([s["strat"]["score"] for s in val_stats.values()]))
+        # Across classes, because pooled recall is length-weighted and would let
+        # faint trail -- the thing this project is for -- be traded away for
+        # more of what we already detect.
+        score, score_all, deployable = selection_score(val_stats)
         if epoch == 0:
+            if not deployable:
+                log.warning("no deployable variant among %s: selecting on the "
+                            "all-variant mean, which picks a checkpoint for a "
+                            "model export_onnx will refuse",
+                            "/".join(val_stats))
             for k, s in val_stats.items():
                 gone = [c for c in osm.CLASS_CODE if c not in s["strat"]["classes"]]
                 if gone:
@@ -363,6 +394,7 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
         history.append({"epoch": epoch, "ramp": round(ramp, 2),
                         "train": train_stats, "val": val_stats,
                         "score": round(score, 4),
+                        "score_all_variants": round(score_all, 4),
                         "seconds": round(time.time() - t0, 1)})
         log.info("epoch %2d/%d  stratified f1 %.4f  [%s]  %.0fs",
                  epoch + 1, cfg.epochs, score,
