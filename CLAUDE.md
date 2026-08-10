@@ -75,9 +75,10 @@ just retrain                   # full training run
 just report                    # what the last run selected, per class and variant
 ```
 
-`uv.lock` resolves for both platforms: the CUDA wheels, NCCL and Triton carry
-`platform_machine == 'x86_64' and sys_platform == 'linux'` markers, so the same
-lock gives MPS on an Apple machine and CUDA on a Linux box with no edits.
+`uv.lock` resolves for both platforms: the CUDA stack (`cuda-toolkit`,
+`cuda-bindings`, the `*-cu13` wheels) and Triton carry `sys_platform == 'linux'`
+markers, so the same lock gives MPS on an Apple machine and CUDA on a Linux box
+with no edits.
 `model.pick_device` prefers CUDA, then MPS, then CPU.
 
 Training state moves between machines: `runs/<name>/last.pt` is written every

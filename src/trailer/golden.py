@@ -155,7 +155,7 @@ def _tile_case(variant: str, body: int, h: int, w: int, out_dir: Path,
             str(out_dir / onnx_name),
             input_names=["elevation_m"],
             output_names=["trail_probability", "window_taper"],
-            opset_version=17)
+            opset_version=18, external_data=False)
 
     # Shaped exactly like a real export sidecar, and the numbers come from the
     # same `window_step` and the same variant table, so ModelSpec validates it

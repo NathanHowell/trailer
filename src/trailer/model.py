@@ -286,13 +286,25 @@ def export_onnx(net: MultiStemNet, variant: str, path, size: int = 256,
         raise ValueError(f"body window {size} must be divisible by 32")
     model = Deployable(net, variant, tta=tta).eval()
     n = v.crop_px(size)
-    # The TorchScript exporter, not dynamo: dynamo currently fails to translate
-    # the stems' BatchNorm (_native_batch_norm_legit_no_training). It handles
-    # the im2col median fine, which was the op in doubt.
+    # The dynamo exporter, which torch 2.13 made the default. It used to fail on
+    # the stems' BatchNorm (_native_batch_norm_legit_no_training); that is fixed,
+    # and the graph it produces is worth having on its own -- static shapes
+    # throughout, no NonZero, roughly half the nodes of the TorchScript path.
+    # A shape-dependent node is what stops a mobile runtime's accelerator
+    # backend from claiming the graph, so this is not only cosmetic.
+    #
+    # external_data=False keeps the weights in the .onnx rather than beside it:
+    # one artifact is what ModelStore downloads and what the sidecar describes.
+    #
+    # Opset 18, not 17, because that is what the exporter actually emits: asking
+    # for 17 makes it emit 18 and then fail to convert Pad back down, leaving an
+    # opset 18 graph anyway with a swallowed error on the way. Naming the real
+    # number means the file matches the request. ORT has supported 18 since
+    # 1.14; the plugin is on 1.20.
     torch.onnx.export(model, (torch.zeros(1, 1, n, n),), str(path),
                       input_names=["elevation_m"],
                       output_names=["trail_probability", "window_taper"],
-                      opset_version=17)
+                      opset_version=18, external_data=False)
     return {
         "variant": variant,
         "res_m": v.res,

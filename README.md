@@ -82,10 +82,10 @@ uv sync                 # data pipeline
 uv sync --extra train   # adds torch, segmentation-models-pytorch, onnx
 ```
 
-The lock file resolves for both platforms — the CUDA wheels, NCCL and Triton
-carry `platform_machine == 'x86_64' and sys_platform == 'linux'` markers — so
-the same `uv.lock` gives MPS on Apple silicon and CUDA on a Linux x86_64 box
-with no edits. `pick_device` prefers CUDA, then MPS, then CPU.
+The lock file resolves for both platforms — the CUDA stack (`cuda-toolkit`,
+`cuda-bindings`, the `*-cu13` wheels) and Triton carry `sys_platform == 'linux'`
+markers — so the same `uv.lock` gives MPS on Apple silicon and CUDA on a Linux
+box with no edits. `pick_device` prefers CUDA, then MPS, then CPU.
 
 `data/` and `runs/` are gitignored and large (~6 GB and ~1 GB), so moving a
 workspace to another machine means `rsync`, not `git clone`. Training state
@@ -93,8 +93,8 @@ travels: `runs/<name>/last.pt` carries the optimiser and LR schedule, and
 `trailer train --resume` restores them.
 
 Inference in JOSM goes through ONNX Runtime's Java API, so torch is an optional
-extra rather than a dependency. Export needs `onnx` only — not `onnxscript`,
-since it uses the TorchScript exporter rather than dynamo.
+extra rather than a dependency. Export needs `onnx` and `onnxscript`, which is
+what the dynamo exporter translates the graph with.
 
 ## Usage
 
@@ -412,8 +412,14 @@ architecture, not an export limitation — a ResNet-34 U-Net needs its input
 divisible by 32 — and it costs nothing, because the plugin must tile with a
 Hann-tapered overlapping window regardless.
 
-Export goes through the TorchScript exporter, not dynamo, which fails on the
-stems' BatchNorm. The one op with no ONNX equivalent is the median filter;
+Export goes through the dynamo exporter at opset 18, in one file. It used to go
+through TorchScript because dynamo could not translate the stems' BatchNorm;
+that was fixed in torch 2.13, and the dynamo graph is the better artifact
+anyway — static shapes throughout, no `NonZero`, 196 nodes against 531. That
+matters beyond tidiness: a shape-dependent node is what stops a mobile
+runtime's accelerator backend from claiming the graph.
+
+The one op with no ONNX equivalent is the median filter;
 `im2col` + `TopK` reproduces `scipy.ndimage.median_filter` bit-for-bit at
 k = 3, 4, 10, 20, including the lower-median convention for even k. A round trip
 through onnxruntime on real elevation matches torch to 2.7e-6.

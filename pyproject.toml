@@ -28,9 +28,12 @@ dependencies = [
 # API, so nothing here ships to the plugin.
 train = [
     "segmentation-models-pytorch>=0.4",
-    "torch>=2.6.0",
-    "torchvision>=0.21.0",
+    "torch>=2.13.0",
+    "torchvision>=0.28.0",
     "onnx>=1.17",
+    # torch.onnx.export defaults to the dynamo exporter from 2.13; it is the
+    # maintained path, and it needs onnxscript to translate the graph.
+    "onnxscript>=0.5",
     "onnxruntime>=1.20",
 ]
 
