@@ -56,7 +56,7 @@ def _loaders(dirs: list[Path], variants, cfg) -> dict[str, tuple]:
     common = dict(batch_size=cfg.batch, num_workers=cfg.workers,
                   pin_memory=False, persistent_workers=cfg.workers > 0,
                   multiprocessing_context=ctx)
-    for v in variants:
+    for i, v in enumerate(variants):
         train = TileDataset(dirs, v, body_crop=cfg.crop, split="train",
                             samples=cfg.samples, augment=True,
                             noise_m=cfg.noise_m, noise_band_m=cfg.noise_band_m,
@@ -64,8 +64,19 @@ def _loaders(dirs: list[Path], variants, cfg) -> dict[str, tuple]:
                             jitter_m=cfg.jitter_m)
         val = TileDataset(dirs, v, body_crop=cfg.crop, split="val",
                           samples=max(cfg.samples // 8, 64), augment=False)
-        out[v.key] = (DataLoader(train, shuffle=False, drop_last=True, **common),
-                      DataLoader(val, shuffle=False, **common))
+        # A generator per (variant, split), not one shared across them. The
+        # DataLoader draws each worker's torch seed from this generator, and
+        # TileDataset._generator derives from torch.initial_seed(), so seeding
+        # here reaches crop sampling and augmentation in every worker without a
+        # worker_init_fn. Distinct streams keep the two variants off identical
+        # crop sequences and stop val mirroring train.
+        gt, gv = torch.Generator(), torch.Generator()
+        if cfg.seed is not None:
+            gt.manual_seed(cfg.seed + 1000 * i)
+            gv.manual_seed(cfg.seed + 1000 * i + 500)
+        out[v.key] = (DataLoader(train, shuffle=False, drop_last=True,
+                                 generator=gt, **common),
+                      DataLoader(val, shuffle=False, generator=gv, **common))
     return out
 
 
@@ -225,6 +236,14 @@ def run(train_dirs: list[Path], test_dirs: list[Path], cfg) -> dict:
     res = var_mod.BODY_RES
     log.info("device=%s, body res=%g m, %d m of context per crop",
              device, res, cfg.crop * res)
+
+    # Before build_model and estimate_prior, which both draw from the main
+    # process rng -- weight init for the stems and encoder head, and the 256
+    # crops the prior is estimated from.
+    if cfg.seed is not None:
+        torch.manual_seed(cfg.seed)
+        log.info("seed %d: weight init and crop sampling are repeatable; "
+                 "kernel non-determinism is not addressed", cfg.seed)
 
     loaders = _loaders(train_dirs, variants, cfg)
     net = model_mod.build_model(cfg.arch, cfg.encoder, variants=variants,

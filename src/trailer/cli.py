@@ -495,6 +495,9 @@ def main(argv=None) -> int:
                    help="probability of withholding the chm/vdi canopy bands "
                         "from a canopy-bearing variant")
     t.add_argument("--workers", type=int, default=4)
+    t.add_argument("--seed", type=int, default=None,
+                   help="make weight init and crop sampling repeatable; a "
+                        "seeded run is reproducible, not representative")
     t.add_argument("--device", default=None, help="cuda / mps / cpu")
     t.add_argument("--tta", action="store_true",
                    help="D4 test-time augmentation for held-out scoring")
