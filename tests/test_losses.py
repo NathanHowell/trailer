@@ -42,7 +42,7 @@ def test_reported_parts_add_up_to_the_total():
                      tolerance_m=5.0, res=1.0)
     logits, y, w = _fixture()
     total, parts = crit(logits, y, w, ramp=0.0)
-    assert math.isclose(float(total), parts["bce"] + parts["tversky"],
+    assert math.isclose(float(total.detach()), parts["bce"] + parts["tversky"],
                         rel_tol=1e-6)
 
 
@@ -53,8 +53,8 @@ def test_the_ramp_scales_cldice_into_the_total():
     logits, y, w = _fixture()
     base, _ = crit(logits, y, w, ramp=0.0)
     half, parts = crit(logits, y, w, ramp=0.5)
-    assert math.isclose(float(half) - float(base), 0.5 * parts["cldice"],
-                        rel_tol=1e-5)
+    assert math.isclose(float(half.detach()) - float(base.detach()),
+                        0.5 * parts["cldice"], rel_tol=1e-5)
 
 
 def test_gradients_reach_the_logits_through_the_relaxed_forms():
@@ -88,4 +88,4 @@ def test_ignored_pixels_out_of_dilation_reach_do_not_move_the_loss():
     scrambled = logits.detach().clone()
     scrambled[:, :, :8, :] += 50.0           # rows 0-7, >5 px from row 16
     b, _ = crit(scrambled.requires_grad_(True), y, w, ramp=1.0)
-    assert math.isclose(float(a), float(b), rel_tol=1e-5)
+    assert math.isclose(float(a.detach()), float(b.detach()), rel_tol=1e-5)
